@@ -19,11 +19,12 @@ void receiver(App *self, int c)
   CANMsg msg;
   CAN_RECEIVE(&can0, &msg);
   SCI_WRITE(&sci0, "Can msg received: ");
+  msg.buff[msg.length] = '\0'; // Null-terminate the buffer
   SCI_WRITE(&sci0, msg.buff);
 }
 
-// due to buffer error and some ghoslty 
-// result, best way to display is string
+/* due to buffer error and some ghoslty
+   result, best way to display is string */
 void int_to_str(int n, char *str)
 {
   int i = 0, is_negative = 0;
@@ -55,8 +56,8 @@ void int_to_str(int n, char *str)
   }
 }
 
-// old debug method, caused ghosly
-// and garbage display
+/* old debug method, caused ghostly
+   and garbage display */
 void debugNumber(App *self)
 {
   SCI_WRITE(&sci0, "\nArray: ");
@@ -88,9 +89,10 @@ int calculateMedian(App *self)
 
 void reader(App *self, int c)
 {
-  // first character
+  // just echo the char back to the console for debug purpose
   SCI_WRITECHAR(&sci0, c);
 
+  // fluse case, reset the history an buffer
   if (c == 'F')
   {
     // handle flush case
@@ -133,17 +135,10 @@ void reader(App *self, int c)
     SCI_WRITE(&sci0, "\n");
 
     self->num_pos = 0;
-    self->pos = 0;
   }
-  else if (self->pos < 1)
+  else // store what we typed
   {
-    // only accept 1 character at a time
-    self->buffer[0] = (char)c;
-    self->buffer[1] = '\0';
-
     SCI_WRITE(&sci0, "\nRcv: '");
-    // SCI_WRITE(&sci0, self->buffer);
-    // actually use write char is a good one...
     SCI_WRITECHAR(&sci0, c);
     SCI_WRITE(&sci0, "'\n");
 
@@ -153,12 +148,6 @@ void reader(App *self, int c)
       self->number[self->num_pos++] = (char)c;
     }
 
-    self->pos = 0;
-  }
-  else
-  {
-    // cannot reach here, only error can make it to this point
-    SCI_WRITE(&sci0, "\nError: Only 1 char allowed!\n");
   }
 }
 
