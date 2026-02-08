@@ -77,6 +77,18 @@ int calculateMedian(App *self)
   int c = self->history[2];
   int median;
 
+  if (self->count == 1)
+  {
+    // If we have only one number, return it
+    return self->history[0];
+  }
+  else if (self->count == 2)
+  {
+    // If we have less than 3 numbers, return the most recent one
+    median = (a + b) / 2;
+    return median;
+  }
+
   if ((a <= b && b <= c) || (c <= b && b <= a))
     median = b;
   else if ((b <= a && a <= c) || (c <= a && a <= b))
@@ -90,7 +102,7 @@ int calculateMedian(App *self)
 void reader(App *self, int c)
 {
   // just echo the char back to the console for debug purpose
-  SCI_WRITECHAR(&sci0, c);
+  // SCI_WRITECHAR(&sci0, c);
 
   // fluse case, reset the history an buffer
   if (c == 'F')
@@ -101,6 +113,7 @@ void reader(App *self, int c)
     for (int i = 0; i < 3; i++)
       self->history[i] = 0;
     self->num_pos = 0;
+    self->count = 0;
     SCI_WRITE(&sci0, "The 3-history has been erased\n");
     return;
   }
