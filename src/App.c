@@ -38,13 +38,24 @@ void receiver(App *self, int unused)
 // helper function to print menu
 void print_helper(App *self)
 {
-  SCI_WRITE(&sci0, "\n--- Main Menu ---\n");
-  SCI_WRITE(&sci0, "This is tone generator, it has 2 functions: \n");
-  SCI_WRITE(&sci0, "The tone will be automatically run, can be stopped with 'mute' (or 's').\n");
-  SCI_WRITE(&sci0, "Type 'volume' (or 'v') to begin increase or decrease the volume.\n");
-  SCI_WRITE(&sci0, "Type 'background' (or 'b') to adjust background payload period.\n");
-  SCI_WRITE(&sci0, "Type 'deadline'/'nodeadline' (or 'd'/'e') to toggle deadline mode.\n");
-  SCI_WRITE(&sci0, "Type 'help' (or 'h') to show this menu.\n");
+  (void)self;
+  SCI_WRITE(&sci0, "\n=== Tone Generator Console ===\n");
+  SCI_WRITE(&sci0, "Enter a command and press Enter.\n");
+  SCI_WRITE(&sci0, "\nMain commands:\n");
+  SCI_WRITE(&sci0, "  v | volume       Set volume (0-20)\n");
+  SCI_WRITE(&sci0, "  s | mute         Mute tone output\n");
+  SCI_WRITE(&sci0, "  r | unmute       Resume tone output\n");
+  SCI_WRITE(&sci0, "  b | bg | background  Adjust background load\n");
+  SCI_WRITE(&sci0, "  d | deadline     Enable deadline mode\n");
+  SCI_WRITE(&sci0, "  e | nd | nodeadline  Disable deadline mode\n");
+  SCI_WRITE(&sci0, "  h | help         Show this help\n");
+  SCI_WRITE(&sci0, "\nIn volume mode:\n");
+  SCI_WRITE(&sci0, "  Enter a number 0-20, then Enter\n");
+  SCI_WRITE(&sci0, "  e               Return to main menu\n");
+  SCI_WRITE(&sci0, "\nIn background mode:\n");
+  SCI_WRITE(&sci0, "  +               Increase background load\n");
+  SCI_WRITE(&sci0, "  -               Decrease background load\n");
+  SCI_WRITE(&sci0, "  e               Return to main menu\n");
   SCI_WRITE(&sci0, "Choice: ");
 }
 
@@ -130,8 +141,17 @@ void background_task(LoadTask *self, int unused)
   {
     asm("nop");     // do nothing, just insert "no operation" isntruction to CPU
   }
-  // AFTER(USEC(self->period), self, background_task, 0);
-  SEND(USEC(self->period), USEC(1300), self, background_task, 0);
+
+  if (self->deadline)
+  {
+    // in deadline mode: periodic release with relative deadline
+    SEND(USEC(self->period), USEC(1300), self, background_task, 0);
+  }
+  else
+  {
+    // no-deadline mode: periodic release only (best-effort)
+    AFTER(USEC(self->period), self, background_task, 0);
+  }
 }
 
 void background_wcet_measurement(LoadTask *self, int unused)
@@ -232,7 +252,16 @@ void tone_generator(App *self, int state)
       SCI_WRITE(&sci0, "\nReceive mute signal, surpress tone generator...\n");
     }
     DAC_PORT = 0;
-    // cannot return dirctly, need to keep checking the mute status and wait until it is unmuted
+    // keep scheduling while muted so we can resume immediately when unmuted
+    if (self->deadline == true)
+    {
+      SEND(USEC(500), USEC(100), self, tone_generator, state);
+    }
+    else
+    {
+      AFTER(USEC(500), self, tone_generator, state);
+    }
+    return;
   }
 
   // change the DAC bit
@@ -252,13 +281,13 @@ void tone_generator(App *self, int state)
      every time, the period is 1ms) */
   if (self->deadline == true)
   {
-    // if in deadline control mode, set deadline to 500 microseconds later
-    AFTER(USEC(500), self, tone_generator, next_state);
+    // deadline mode: periodic release with relative deadline
+    SEND(USEC(500), USEC(100), self, tone_generator, next_state);
   }
   else
   {
-    // otherwise, just set a normal periodic task
-    SEND(USEC(500), USEC(100), self, tone_generator, next_state);
+    // no-deadline mode: periodic release only (best-effort)
+    AFTER(USEC(500), self, tone_generator, next_state);
   }
 }
 
