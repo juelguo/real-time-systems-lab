@@ -3,16 +3,24 @@
 
 #include "TinyTimber.h"
 
+typedef enum
+{
+  CONTROL_MODE = 0,
+  VOLUME_MODE = 1,
+  BACKGROUND_LOAD_MODE = 2,
+  DEADLINE_CONTROL_MODE = 3
+} Mode;
+
 typedef struct
 {
-  Object super;
-  Timer timer;
-  char buffer[12];
-  int background_loop;
-  int mode;
+  Object super;         // inherit from Object
+  Timer timer;          // inherit from Timer
+  char buffer[12];      // buffer for user input
+  Mode mode;             // 0: default, 1: volume control, 2: background load adjust
   int pos;
   int val;
-  int mute;
+  bool mute;             // set mute to 1 to stop tone generator, set to 0 to start it
+  bool deadline;         // the deadline for the deadline control mode
 } App;
 
 #define initApp() {initObject(), initTimer(), {0}, 0, 0, 0, 0, 0}
@@ -25,10 +33,11 @@ typedef struct
 {
   /* data */
   Object super;
-  int background_loop_range;
+  int background_loop_range;    // the range of the background loop
   int period;
+  bool deadline;
 } LoadTask;
 
-#define initLoadTask() {initObject(), 0, 1300}
+#define initLoadTask() {initObject(), 0, 1000}
 
 #endif

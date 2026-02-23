@@ -61,3 +61,34 @@ This uses `bin/console` with the built S19 file.
 ```sh
 make clean
 ```
+
+## Lab 1 Introduction
+
+### Problem 1:
+Demonstrate the audible 1 kHz output, as well as the volume
+control and mute functionality.
+Answer:
+
+**audible output**
+after we launch this program, it will generate 1kHz optput, using the following function.
+``` c
+AFTER(USEC(500), self, tone_generator, next_state);
+```
+The time intervel is set to 500us, we will get 1 kHz output.
+
+- Type letter 'e': enter volume control mode
+- Type letter 's': mute device
+- Type letter 'b': adjusting background load
+
+**volume control**
+
+In volume control mode, if user types 'e', it will exit volume control mode, return to main menu.
+
+If the user type a number in range of 0 - 20, this value will be saved to `self.val`. In the period task, tone_generator will make the value as its actual output.
+
+### problem 2a:
+
+In background load adjusting mode, if user types 'e', it will exit this mode and return to the main menu.
+
+If user types '+', the background load value will increase 500. If user types '-', the background load value will decrease 500. The range of background load value is 0 - 8000.
+

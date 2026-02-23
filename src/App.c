@@ -29,7 +29,7 @@ void receiver(App *self, int unused)
   SCI_WRITE(&sci0, msg.buff);
 }
 
-// print the header each time
+// helper function to print menu
 void print_helper(App *self)
 {
   SCI_WRITE(&sci0, "\n--- Main Menu ---\n");
@@ -40,8 +40,7 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "Choice: ");
 }
 
-// convert integer to string
-// for printing
+// convert int to string, store in buffer
 void int_to_string(int n, char *buffer)
 {
   int i = 0, is_negative = 0;
@@ -81,9 +80,10 @@ void background_task(LoadTask *self, int unused)
 {
   for (int i = 0; i < self->background_loop_range; i++)
   {
-    asm("nop");
+    asm("nop");     // do nothing, just insert "no operation" isntruction to CPU
   }
-  AFTER(USEC(self->period), self, background_task, 0);
+  // AFTER(USEC(self->period), self, background_task, 0);
+  SEND(USEC(self->period), USEC(1300), self, background_task, 0);
 }
 
 // hanlder for loop range adjust
@@ -125,6 +125,7 @@ void background_loop_handler(App *self, LoadTask *task, char c)
 // tone generator
 void tone_generator(App *self, int state)
 {
+  // check if muted
   if (self->mute == 1)
   {
     if (DEBUG)
@@ -147,8 +148,19 @@ void tone_generator(App *self, int state)
     DAC_PORT = 0;
   }
 
-  // generate tone
-  AFTER(USEC(500), self, tone_generator, next_state);
+  /* generate tone, it will execute every 500 microseconds,
+     which means the frequency is 1kHz (since we toggle the bit
+     every time, the period is 1ms) */
+  if (self->deadline == TRUE)
+  {
+    // if in deadline control mode, set deadline to 500 microseconds later
+    AFTER(USEC(500), self, tone_generator, next_state);
+  }
+  else
+  {
+    // otherwise, just set a normal periodic task
+    SEND(USEC(500), USEC(100), self, tone_generator, next_state);
+  }
 }
 
 // control the volume (logic)
@@ -218,44 +230,67 @@ void volume_control_handler(App *self, char controL_character)
   }
 }
 
+// handler for sci interrupt, read user input and call corresponding handler
 void reader(App *self, int c)
 {
+  // if currently in volume cotrol mode, call volume control handler
   if (self->mode == 1)
   {
     if (DEBUG)
     {
-      SCI_WRITE(&sci0, "\nDefault mode, currently in volume mode...\n");
+      SCI_WRITE(&sci0, "\nCurrently in volume mode...\n");
     }
     volume_control_handler(self, (char)c);
     return;
   }
 
-  if (self->mode == 2)
+  // if currently in background load adjust mode, call background load handler
+  if (self->mode == BACKGROUND_LOAD_MODE)
   {
+    if (DEBUG)
+    {
+      SCI_WRITE(&sci0, "\nCurrently in background load mode...\n");
+    }
+
     background_loop_handler(self, &load_obj, (char)c);
     return;
   }
 
+  // otherwise, it is in control mode
   switch (c)
   {
   case 'v':
-    /* code */
     if (DEBUG)
     {
       SCI_WRITE(&sci0, "\nEnter volume mode, input value to adjust volume.\n");
     }
-    self->mode = 1;
+    self->mode = VOLUME_MODE;
     self->pos = 0;
     SCI_WRITE(&sci0, "\nInput the volume, end with enter: ");
     break;
   case 's':
-    self->mute = 1;
+    self->mute = TRUE;
     SCI_WRITE(&sci0, "\nMuting tone generator...\n");
     print_helper(self);
     break;
+  case 'r':
+    self->mute = FALSE;
+    SCI_WRITE(&sci0, "\nUnmuting tone generator...\n");
+    print_helper(self);
+    break;
   case 'b':
-    self->mode = 2;
+    self->mode = BACKGROUND_LOAD_MODE;
     SCI_WRITE(&sci0, "\nAdjusting background load (use '+' or '-' to change): ");
+    break;
+  case 'd':
+    self->deadline = TRUE;
+    load_obj.deadline = TRUE;
+    SCI_WRITE(&sci0, "\nEnable deadline control mode...\n");
+    break;
+  case 'e':
+    self->deadline = FALSE;
+    load_obj.deadline = FALSE;
+    SCI_WRITE(&sci0, "\nDisable deadline control mode...\n");
     break;
   default:
     break;
@@ -269,11 +304,11 @@ void startApp(App *self, int arg)
   CAN_INIT(&can0);
   SCI_INIT(&sci0);
 
-  self->mute = 0;
-  self->mode = 0;
-  self->background_loop = 1000;
+  self->mute = 0;   // set default to unmuted
+  self->mode = CONTROL_MODE;   // set default mode
 
-  print_helper(self);
+  print_helper(self);   /* print help info */
+
   tone_generator(self, 1);
   ASYNC(&load_obj, background_task, 0);
 }
