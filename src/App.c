@@ -2,10 +2,12 @@
 #include "TinyTimber.h"
 #include "canTinyTimber.h"
 #include "sciTinyTimber.h"
+#include "stm32f4xx.h"
 
 // custom incl
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 extern App app;
 extern Can can0;
@@ -20,6 +22,10 @@ extern LoadTask load_obj;
 #define MIN_TASK 1000
 
 #define DEBUG 0
+#define WCET_SAMPLES 500
+#define WCET_BG_ISOLATED_MODE 1
+#define WCET_BG_LOOP_RANGE 4000
+#define CPU_FREQ_HZ 168000000UL
 
 void receiver(App *self, int unused)
 {
@@ -77,6 +83,46 @@ void int_to_string(int n, char *buffer)
   }
 }
 
+void uint64_to_string(uint64_t n, char *buffer)
+{
+  int i = 0;
+  if (n == 0)
+  {
+    buffer[i++] = '0';
+    buffer[i] = '\0';
+    return;
+  }
+  while (n != 0)
+  {
+    buffer[i++] = (char)((n % 10) + '0');
+    n = n / 10;
+  }
+  buffer[i] = '\0';
+
+  for (int j = 0; j < i / 2; j++)
+  {
+    char temp = buffer[j];
+    buffer[j] = buffer[i - j - 1];
+    buffer[i - j - 1] = temp;
+  }
+}
+
+static void init_cycle_counter(void)
+{
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+static uint32_t cycles_to_usec(uint64_t cycles)
+{
+  if (CPU_FREQ_HZ == 0)
+  {
+    return 0;
+  }
+  return (uint32_t)((cycles * 1000000ULL) / CPU_FREQ_HZ);
+}
+
 // a background task with specific period
 void background_task(LoadTask *self, int unused)
 {
@@ -86,6 +132,57 @@ void background_task(LoadTask *self, int unused)
   }
   // AFTER(USEC(self->period), self, background_task, 0);
   SEND(USEC(self->period), USEC(1300), self, background_task, 0);
+}
+
+void background_wcet_measurement(LoadTask *self, int unused)
+{
+  self->wcet_sample_count = 0;
+  self->wcet_max_cycles = 0;
+  self->wcet_total_cycles = 0;
+
+  for (uint32_t run = 0; run < WCET_SAMPLES; run++)
+  {
+    uint32_t start = DWT->CYCCNT;
+    for (int i = 0; i < self->background_loop_range; i++)
+    {
+      asm volatile("nop");
+    }
+    uint32_t elapsed = DWT->CYCCNT - start;
+
+    self->wcet_sample_count++;
+    self->wcet_total_cycles += elapsed;
+    if (elapsed > self->wcet_max_cycles)
+    {
+      self->wcet_max_cycles = elapsed;
+    }
+  }
+
+  uint64_t avg_cycles = self->wcet_total_cycles / self->wcet_sample_count;
+  uint32_t max_usec = cycles_to_usec(self->wcet_max_cycles);
+  uint32_t avg_usec = cycles_to_usec(avg_cycles);
+
+  char buff[32];
+  SCI_WRITE(&sci0, "\n[WCET] Background task payload only (500 runs)\n");
+  SCI_WRITE(&sci0, "[WCET] loop_range = ");
+  int_to_string(self->background_loop_range, buff);
+  SCI_WRITE(&sci0, buff);
+  SCI_WRITE(&sci0, "\n");
+
+  SCI_WRITE(&sci0, "[WCET] max cycles = ");
+  int_to_string((int)self->wcet_max_cycles, buff);
+  SCI_WRITE(&sci0, buff);
+  SCI_WRITE(&sci0, ", max us = ");
+  int_to_string((int)max_usec, buff);
+  SCI_WRITE(&sci0, buff);
+  SCI_WRITE(&sci0, "\n");
+
+  SCI_WRITE(&sci0, "[WCET] avg cycles = ");
+  uint64_to_string(avg_cycles, buff);
+  SCI_WRITE(&sci0, buff);
+  SCI_WRITE(&sci0, ", avg us = ");
+  int_to_string((int)avg_usec, buff);
+  SCI_WRITE(&sci0, buff);
+  SCI_WRITE(&sci0, "\n");
 }
 
 // hanlder for loop range adjust
@@ -366,9 +463,18 @@ void startApp(App *self, int arg)
 {
   CAN_INIT(&can0);
   SCI_INIT(&sci0);
+  init_cycle_counter();
 
   self->mute = 0;   // set default to unmuted
   self->mode = CONTROL_MODE;   // set default mode
+
+#if WCET_BG_ISOLATED_MODE
+  self->mute = 1;
+  load_obj.background_loop_range = WCET_BG_LOOP_RANGE;
+  SCI_WRITE(&sci0, "\nRunning isolated WCET measurement for background task...\n");
+  background_wcet_measurement(&load_obj, 0);
+  return;
+#endif
 
   print_helper(self);   /* print help info */
 

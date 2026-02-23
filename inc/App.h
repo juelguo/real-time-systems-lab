@@ -2,6 +2,7 @@
 #define _APP_H
 
 #include "TinyTimber.h"
+#include <stdint.h>
 
 typedef enum
 {
@@ -36,8 +37,11 @@ typedef struct
   int background_loop_range;    // the range of the background loop
   int period;
   bool deadline;
+  uint32_t wcet_sample_count;
+  uint32_t wcet_max_cycles;
+  uint64_t wcet_total_cycles;
 } LoadTask;
 
-#define initLoadTask() {initObject(), 0, 1000, 0}
+#define initLoadTask() {initObject(), 0, 1000, 0, 0, 0, 0}
 
 #endif
