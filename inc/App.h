@@ -15,7 +15,7 @@ typedef struct
 {
   Object super;         // inherit from Object
   Timer timer;          // inherit from Timer
-  char buffer[12];      // buffer for user input
+  char buffer[32];      // buffer for user input
   Mode mode;             // 0: default, 1: volume control, 2: background load adjust
   int pos;
   int val;
@@ -38,6 +38,6 @@ typedef struct
   bool deadline;
 } LoadTask;
 
-#define initLoadTask() {initObject(), 0, 1000}
+#define initLoadTask() {initObject(), 0, 1000, 0}
 
 #endif

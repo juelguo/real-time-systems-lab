@@ -34,9 +34,11 @@ void print_helper(App *self)
 {
   SCI_WRITE(&sci0, "\n--- Main Menu ---\n");
   SCI_WRITE(&sci0, "This is tone generator, it has 2 functions: \n");
-  SCI_WRITE(&sci0, "The tone will be automatically run, can be stopped with 's'.\n");
-  SCI_WRITE(&sci0, "Press 'v' to begin increase or decrease the volume.\n");
-  SCI_WRITE(&sci0, "Press 'b' to adjust background payload period...\n");
+  SCI_WRITE(&sci0, "The tone will be automatically run, can be stopped with 'mute' (or 's').\n");
+  SCI_WRITE(&sci0, "Type 'volume' (or 'v') to begin increase or decrease the volume.\n");
+  SCI_WRITE(&sci0, "Type 'background' (or 'b') to adjust background payload period.\n");
+  SCI_WRITE(&sci0, "Type 'deadline'/'nodeadline' (or 'd'/'e') to toggle deadline mode.\n");
+  SCI_WRITE(&sci0, "Type 'help' (or 'h') to show this menu.\n");
   SCI_WRITE(&sci0, "Choice: ");
 }
 
@@ -64,8 +66,8 @@ void int_to_string(int n, char *buffer)
   {
     // add sign
     buffer[i++] = '-';
-    buffer[i] = '\0';
   }
+  buffer[i] = '\0';
 
   for (int j = 0; j < i / 2; j++)
   {
@@ -133,7 +135,7 @@ void tone_generator(App *self, int state)
       SCI_WRITE(&sci0, "\nReceive mute signal, surpress tone generator...\n");
     }
     DAC_PORT = 0;
-    return;
+    // cannot return dirctly, need to keep checking the mute status and wait until it is unmuted
   }
 
   // change the DAC bit
@@ -151,7 +153,7 @@ void tone_generator(App *self, int state)
   /* generate tone, it will execute every 500 microseconds,
      which means the frequency is 1kHz (since we toggle the bit
      every time, the period is 1ms) */
-  if (self->deadline == TRUE)
+  if (self->deadline == true)
   {
     // if in deadline control mode, set deadline to 500 microseconds later
     AFTER(USEC(500), self, tone_generator, next_state);
@@ -223,10 +225,109 @@ void volume_control_handler(App *self, char controL_character)
     SCI_WRITE(&sci0, "\n");
     self->pos = 0;
   }
-  else if (self->pos < 12)
+  else if (self->pos < (int)(sizeof(self->buffer) - 1))
   {
     self->buffer[self->pos++] = controL_character;
     SCI_WRITECHAR(&sci0, controL_character);
+  }
+}
+
+void command_handler(App *self, char character)
+{
+  if (DEBUG)
+  {
+    SCI_WRITE(&sci0, "\nEnter command handler...\n");
+  }
+
+  if (character == '\n' || character == '\r')
+  {
+    self->buffer[self->pos] = '\0';
+
+    // Normalize command to lowercase in-place.
+    for (int i = 0; self->buffer[i] != '\0'; i++)
+    {
+      if (self->buffer[i] >= 'A' && self->buffer[i] <= 'Z')
+      {
+        self->buffer[i] = self->buffer[i] - 'A' + 'a';
+      }
+    }
+
+    if (self->pos == 0)
+    {
+      print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "v") == 0 || strcmp(self->buffer, "volume") == 0)
+    {
+      self->mode = VOLUME_MODE;
+      self->pos = 0;
+      SCI_WRITE(&sci0, "\nInput the volume, end with enter: ");
+      return;
+    }
+
+    if (strcmp(self->buffer, "s") == 0 || strcmp(self->buffer, "mute") == 0)
+    {
+      self->mute = true;
+      self->pos = 0;
+      SCI_WRITE(&sci0, "\nMuting tone generator...\n");
+      print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "r") == 0 || strcmp(self->buffer, "unmute") == 0)
+    {
+      self->mute = false;
+      self->pos = 0;
+      SCI_WRITE(&sci0, "\nUnmuting tone generator...\n");
+      print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "b") == 0 || strcmp(self->buffer, "bg") == 0 || strcmp(self->buffer, "background") == 0)
+    {
+      self->mode = BACKGROUND_LOAD_MODE;
+      self->pos = 0;
+      SCI_WRITE(&sci0, "\nAdjusting background load (use '+' or '-' to change): ");
+      return;
+    }
+
+    if (strcmp(self->buffer, "d") == 0 || strcmp(self->buffer, "deadline") == 0)
+    {
+      self->deadline = true;
+      load_obj.deadline = true;
+      self->pos = 0;
+      SCI_WRITE(&sci0, "\nEnable deadline control mode...\n");
+      print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "e") == 0 || strcmp(self->buffer, "nd") == 0 || strcmp(self->buffer, "nodeadline") == 0)
+    {
+      self->deadline = false;
+      load_obj.deadline = false;
+      self->pos = 0;
+      SCI_WRITE(&sci0, "\nDisable deadline control mode...\n");
+      print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "h") == 0 || strcmp(self->buffer, "help") == 0)
+    {
+      self->pos = 0;
+      print_helper(self);
+      return;
+    }
+
+    self->pos = 0;
+    SCI_WRITE(&sci0, "\nUnknown command. Type 'help' for valid commands.\n");
+    print_helper(self);
+    return;
+  }
+  else if (self->pos < (int)(sizeof(self->buffer) - 1))
+  {
+    self->buffer[self->pos++] = character;
+    SCI_WRITECHAR(&sci0, character);
   }
 }
 
@@ -234,7 +335,7 @@ void volume_control_handler(App *self, char controL_character)
 void reader(App *self, int c)
 {
   // if currently in volume cotrol mode, call volume control handler
-  if (self->mode == 1)
+  if (self->mode == VOLUME_MODE)
   {
     if (DEBUG)
     {
@@ -257,50 +358,12 @@ void reader(App *self, int c)
   }
 
   // otherwise, it is in control mode
-  switch (c)
-  {
-  case 'v':
-    if (DEBUG)
-    {
-      SCI_WRITE(&sci0, "\nEnter volume mode, input value to adjust volume.\n");
-    }
-    self->mode = VOLUME_MODE;
-    self->pos = 0;
-    SCI_WRITE(&sci0, "\nInput the volume, end with enter: ");
-    break;
-  case 's':
-    self->mute = TRUE;
-    SCI_WRITE(&sci0, "\nMuting tone generator...\n");
-    print_helper(self);
-    break;
-  case 'r':
-    self->mute = FALSE;
-    SCI_WRITE(&sci0, "\nUnmuting tone generator...\n");
-    print_helper(self);
-    break;
-  case 'b':
-    self->mode = BACKGROUND_LOAD_MODE;
-    SCI_WRITE(&sci0, "\nAdjusting background load (use '+' or '-' to change): ");
-    break;
-  case 'd':
-    self->deadline = TRUE;
-    load_obj.deadline = TRUE;
-    SCI_WRITE(&sci0, "\nEnable deadline control mode...\n");
-    break;
-  case 'e':
-    self->deadline = FALSE;
-    load_obj.deadline = FALSE;
-    SCI_WRITE(&sci0, "\nDisable deadline control mode...\n");
-    break;
-  default:
-    break;
-  }
+  command_handler(self, (char)c);
+
 }
 
 void startApp(App *self, int arg)
 {
-  CANMsg msg;
-
   CAN_INIT(&can0);
   SCI_INIT(&sci0);
 
