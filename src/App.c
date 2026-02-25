@@ -185,12 +185,17 @@ void tone_generator(App *self, int state)
   if (self->deadline == true)
   {
     // deadline mode: periodic release with relative deadline
-    SEND(USEC(500), USEC(100), self, tone_generator, next_state);
+    // SEND(USEC(931), USEC(100), self, tone_generator, next_state);    // this is for 539 Hz tone
+    // SEND(USEC(650), USEC(100), self, tone_generator, next_state);    // this is for 769 Hz tone
+   SEND(USEC(500), USEC(100), self, tone_generator, next_state);      // this is for 1000 Hz tone
   }
   else
   {
     // no-deadline mode: periodic release only (best-effort)
-    AFTER(USEC(500), self, tone_generator, next_state);
+    // AFTER(USEC(931), self, tone_generator, next_state);      // this is for 539 Hz tone, around 1500 loop
+    // AFTER(USEC(650), self, tone_generator, next_state);      // this is for 769 Hz tone, arond 3000 loop
+    AFTER(USEC(500), self, tone_generator, next_state);      // this is for 1000 Hz tone, around 4000 loop
+
   }
 }
 
