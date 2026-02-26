@@ -362,8 +362,8 @@ void command_handler(App *self, char character)
     {
       // load_obj.deadline = true;
       // tone_task.deadline = true;
-      ASYNC(&load_obj, deadline_control_tone_handler, 1);
-      ASYNC(&tone_task, deadline_control_bg_handler, 1);
+      ASYNC(&tone_task, deadline_control_tone_handler, 1);
+      ASYNC(&load_obj, deadline_control_bg_handler, 1);
       self->pos = 0;
       SCI_WRITE(&sci0, "\nEnable deadline control mode...\n");
       print_helper(self);
@@ -375,8 +375,8 @@ void command_handler(App *self, char character)
       self->deadline = false;
       // load_obj.deadline = false;
       // tone_task.deadline = false;
-      ASYNC(&load_obj, deadline_control_tone_handler, 0);
-      ASYNC(&tone_task, deadline_control_bg_handler, 0);
+      ASYNC(&tone_task, deadline_control_tone_handler, 0);
+      ASYNC(&load_obj, deadline_control_bg_handler, 0);
       self->pos = 0;
       SCI_WRITE(&sci0, "\nDisable deadline control mode...\n");
       print_helper(self);
