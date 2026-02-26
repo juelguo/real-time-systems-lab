@@ -23,7 +23,17 @@ typedef struct
   bool deadline;         // the deadline for the deadline control mode
 } App;
 
+typedef struct
+{
+  Object super;         // inherit from Object
+  int val;               // the value of the tone, determined by the volume control
+  bool mute;             // set mute to 1 to stop tone generator, set to 0 to start it
+  bool deadline;         // the deadline for the deadline control mode
+} ToneTask;
+
 #define initApp() {initObject(), initTimer(), {0}, 0, 0, 0, 0, 0}
+
+#define initToneTask() {initObject(), 0, 0, 0}
 
 void reader(App *, int);
 void receiver(App *, int);
@@ -38,6 +48,6 @@ typedef struct
   bool deadline;
 } LoadTask;
 
-#define initLoadTask() {initObject(), 0, 1000, 0}
+#define initLoadTask() {initObject(), 0, 1300, 0}
 
 #endif

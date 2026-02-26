@@ -8,6 +8,7 @@
 #include <string.h>
 
 extern App app;
+extern ToneTask tone_task;
 extern Can can0;
 extern Serial sci0;
 extern LoadTask load_obj;
@@ -16,7 +17,7 @@ extern LoadTask load_obj;
 #define MIN_VOLUME 0
 #define MAX_VOLUME 20
 
-#define MAX_TASK 8000
+#define MAX_TASK 80000
 #define MIN_TASK 1000
 
 #define DEBUG 0
@@ -145,7 +146,7 @@ void background_loop_handler(App *self, LoadTask *task, char c)
 }
 
 // tone generator
-void tone_generator(App *self, int state)
+void tone_generator(ToneTask *self, int state)
 {
   // check if muted
   if (self->mute == 1)
@@ -200,7 +201,7 @@ void tone_generator(App *self, int state)
 }
 
 // control the volume (logic)
-void volume_control(App *self, int input)
+void volume_control(int input, ToneTask *tone_task)
 {
   if (input > MAX_VOLUME)
   {
@@ -209,7 +210,7 @@ void volume_control(App *self, int input)
     {
       SCI_WRITE(&sci0, "\nMax volume exceeded, cap the value at max...\n");
     }
-    self->val = MAX_VOLUME;
+    tone_task->val = MAX_VOLUME;
     return;
   }
   if (input < MIN_VOLUME)
@@ -218,11 +219,11 @@ void volume_control(App *self, int input)
     {
       SCI_WRITE(&sci0, "\nMin volume exceeded, cap the value at min...\n");
     }
-    self->val = MIN_VOLUME;
+    tone_task->val = MIN_VOLUME;
     return;
   }
   // handle normally
-  self->val = input;
+  tone_task->val = input;
 }
 
 // handler for volume controller
@@ -250,10 +251,12 @@ void volume_control_handler(App *self, char controL_character)
   {
     self->buffer[self->pos++] = '\0';
     int value = atoi(self->buffer);
-    volume_control(self, value);
+
+    volume_control(value, &tone_task);
+
 
     char current_volume[12];
-    int_to_string(self->val, current_volume);
+    int_to_string(tone_task.val, current_volume);
     SCI_WRITE(&sci0, "\nCurrent volume: ");
     SCI_WRITE(&sci0, current_volume);
     SCI_WRITE(&sci0, "\n");
@@ -264,6 +267,35 @@ void volume_control_handler(App *self, char controL_character)
     self->buffer[self->pos++] = controL_character;
     SCI_WRITECHAR(&sci0, controL_character);
   }
+}
+
+void deadline_control_tone_handler(ToneTask *self, int enable)
+{
+  if (enable)
+  {
+    self->deadline = true;
+    SCI_WRITE(&sci0, "\nEnable deadline deadline_control_tone_handler mode...\n");
+  }
+  else
+  {
+    self->deadline = false;
+    SCI_WRITE(&sci0, "\nDisable deadline deadline_control_tone_handler mode...\n");
+  }
+}
+
+void deadline_control_bg_handler(LoadTask *self, int enable)
+{
+  if (enable)
+  {
+    self->deadline = true;
+    SCI_WRITE(&sci0, "\nEnable deadline deadline_control_bg_handler mode...\n");
+  }
+  else
+  {
+    self->deadline = false;
+    SCI_WRITE(&sci0, "\nDisable deadline deadline_control_bg_handler mode...\n");
+  }
+
 }
 
 void command_handler(App *self, char character)
@@ -302,7 +334,7 @@ void command_handler(App *self, char character)
 
     if (strcmp(self->buffer, "s") == 0 || strcmp(self->buffer, "mute") == 0)
     {
-      self->mute = true;
+      tone_task.mute = true;
       self->pos = 0;
       SCI_WRITE(&sci0, "\nMuting tone generator...\n");
       print_helper(self);
@@ -311,7 +343,7 @@ void command_handler(App *self, char character)
 
     if (strcmp(self->buffer, "r") == 0 || strcmp(self->buffer, "unmute") == 0)
     {
-      self->mute = false;
+      tone_task.mute = false;
       self->pos = 0;
       SCI_WRITE(&sci0, "\nUnmuting tone generator...\n");
       print_helper(self);
@@ -328,8 +360,10 @@ void command_handler(App *self, char character)
 
     if (strcmp(self->buffer, "d") == 0 || strcmp(self->buffer, "deadline") == 0)
     {
-      self->deadline = true;
-      load_obj.deadline = true;
+      // load_obj.deadline = true;
+      // tone_task.deadline = true;
+      ASYNC(&load_obj, deadline_control_tone_handler, 1);
+      ASYNC(&tone_task, deadline_control_bg_handler, 1);
       self->pos = 0;
       SCI_WRITE(&sci0, "\nEnable deadline control mode...\n");
       print_helper(self);
@@ -339,7 +373,10 @@ void command_handler(App *self, char character)
     if (strcmp(self->buffer, "e") == 0 || strcmp(self->buffer, "nd") == 0 || strcmp(self->buffer, "nodeadline") == 0)
     {
       self->deadline = false;
-      load_obj.deadline = false;
+      // load_obj.deadline = false;
+      // tone_task.deadline = false;
+      ASYNC(&load_obj, deadline_control_tone_handler, 0);
+      ASYNC(&tone_task, deadline_control_bg_handler, 0);
       self->pos = 0;
       SCI_WRITE(&sci0, "\nDisable deadline control mode...\n");
       print_helper(self);
@@ -404,9 +441,12 @@ void startApp(App *self, int arg)
   self->mute = 0;   // set default to unmuted
   self->mode = CONTROL_MODE;   // set default mode
 
+  tone_task.mute = 0;
+  tone_task.deadline = 0;
+
   print_helper(self);   /* print help info */
 
-  tone_generator(self, 1);
+  ASYNC(&tone_task, tone_generator, 1);
   ASYNC(&load_obj, background_task, 0);
 }
 
