@@ -3,51 +3,52 @@
 
 #include "TinyTimber.h"
 
+// for media player
 typedef enum
 {
   CONTROL_MODE = 0,
   VOLUME_MODE = 1,
-  BACKGROUND_LOAD_MODE = 2,
-  DEADLINE_CONTROL_MODE = 3
+  KEY_MODE = 2,
+  TEMPO_MODE = 3
 } Mode;
 
 typedef struct
 {
-  Object super;         // inherit from Object
-  Timer timer;          // inherit from Timer
-  char buffer[32];      // buffer for user input
-  Mode mode;             // 0: default, 1: volume control, 2: background load adjust
-  int pos;
-  int val;
-  bool mute;             // set mute to 1 to stop tone generator, set to 0 to start it
-  bool deadline;         // the deadline for the deadline control mode
+  Object super;
+  char buffer[32]; // receive command
+  int buffer_pos;  // pointer to buffer position
+  int mode;
+  int current_index; // current tone index to play
+  int key;           // shifted key
+  int tempo;         // length to play
+  int mute;          // indicate mute or not
 } App;
 
-typedef struct
-{
-  Object super;         // inherit from Object
-  int val;               // the value of the tone, determined by the volume control
-  bool mute;             // set mute to 1 to stop tone generator, set to 0 to start it
-  bool deadline;         // the deadline for the deadline control mode
-} ToneTask;
-
-#define initApp() {initObject(), initTimer(), {0}, 0, 0, 0, 0, 0}
-
-#define initToneTask() {initObject(), 0, 0, 0}
+#define initApp() {initObject(), {0}, 0, 0, 0, 0, 120, 0}
 
 void reader(App *, int);
 void receiver(App *, int);
 void startApp(App *, int);
 
+void play_note(App *, int);
+void stop_note(App *, int);
+
 typedef struct
 {
-  /* data */
   Object super;
-  int background_loop_range;    // the range of the background loop
-  int period;
-  bool deadline;
-} LoadTask;
+  int val;    // value for the volume
+  int mute;   // mute or not
+  int period; // period
+} ToneTask;
 
-#define initLoadTask() {initObject(), 0, 1300, 0}
+#define initToneTask() {initObject(), 0, 0, 0};
+
+// set method
+void tone_set_mute(ToneTask *, int);
+void tone_set_period(ToneTask *, int);
+void tone_set_volume(ToneTask *, int);
+
+// get method
+int tone_get_volume(ToneTask *);
 
 #endif
