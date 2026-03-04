@@ -22,9 +22,10 @@ typedef struct
   int key;           // shifted key
   int tempo;         // length to play
   int mute;          // indicate mute or not
+  int status;        // indicate if the tone generator is already running
 } App;
 
-#define initApp() {initObject(), {0}, 0, 0, 0, 0, 120, 0}
+#define initApp() {initObject(), {0}, 0, 0, 0, 0, 120, 0, 1}
 
 void reader(App *, int);
 void receiver(App *, int);
@@ -41,7 +42,7 @@ typedef struct
   int period; // period
 } ToneTask;
 
-#define initToneTask() {initObject(), 0, 0, 0};
+#define initToneTask() {initObject(), 8, 0, 0};
 
 // set method
 void tone_set_mute(ToneTask *, int);

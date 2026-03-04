@@ -303,6 +303,7 @@ void command_handler(App *self, char c)
     if (strcmp(self->buffer, "q") == 0 || strcmp(self->buffer, "stop") == 0)
     {
       self->mute = 1;
+      self->status = 0;
       SYNC(&tone_task, tone_set_mute, 1);
       self->buffer_pos = 0;
       SCI_WRITE(&sci0, "\nMelody stopped.\n");
@@ -332,7 +333,13 @@ void command_handler(App *self, char c)
       self->current_index = 0;
       self->mute = 0;
       SCI_WRITE(&sci0, "\nPlaying...\n");
-      ASYNC(self, play_note, 0);
+      //check if the tone generator is already running, if not start it
+      if (self->status == 0)
+      {
+        self->status = 1;
+        ASYNC(self, play_note, 0);
+
+      }
       print_helper(self);
       return;
     }
@@ -344,14 +351,21 @@ void command_handler(App *self, char c)
       return;
     }
 
-    if (strcmp(self->buffer, "p") == 0)
+
+    if (strcmp(self->buffer, "s") == 0 || strcmp(self->buffer, "mute") == 0)
     {
       self->buffer_pos = 0;
-      self->current_index = 0;
-      SCI_WRITE(&sci0, "\nPlaying...\n");
+      SYNC(&tone_task, tone_set_volume, 0);
+      SCI_WRITE(&sci0, "\nTone output muted.\n");
+      print_helper(self);
+      return;
+    }
 
-      ASYNC(self, play_note, 0);
-
+    if (strcmp(self->buffer, "r") == 0 || strcmp(self->buffer, "unmute") == 0)
+    {
+      self->buffer_pos = 0;
+      SYNC(&tone_task, tone_set_volume, 15);
+      SCI_WRITE(&sci0, "\nTone output unmuted.\n");
       print_helper(self);
       return;
     }
@@ -390,6 +404,7 @@ void startApp(App *self, int arg)
 
   print_helper(self);
 
+  ASYNC(self, play_note, 0);
   ASYNC(&tone_task, tone_generator, 1);
 }
 
