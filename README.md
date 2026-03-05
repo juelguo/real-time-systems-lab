@@ -52,6 +52,34 @@ make console
 
 This uses `bin/console` with the built S19 file.
 
+## How To Control The Software (SCI Helper)
+When the app starts, it prints a helper menu in the serial console.
+Type a command, then press `Enter`.
+
+### Playback commands
+- `p` or `play`: play the melody
+- `q` or `stop`: stop the melody
+
+### Settings commands
+- `t` or `tempo`: enter tempo-setting mode (valid range `60-240` BPM)
+- `k` or `key`: enter key-setting mode (valid range `-5` to `+5`)
+- `v` or `volume`: enter volume-setting mode (`0-20`)
+
+### Hardware commands
+- `s` or `mute`: mute tone output
+- `r` or `unmute`: resume tone output
+- `h` or `help`: print the helper menu again
+
+### Settings mode behavior
+After `tempo`, `key`, or `volume`:
+- Type a number and press `Enter` to apply
+- Type `e` to cancel and return to main control mode
+
+Input normalization and limits:
+- Commands are case-insensitive
+- `tempo` values are clamped to `60-240`
+- `key` values are clamped to `-5..5`
+
 ## Notes
 - The CAN receive handler prints `msg.buff` as a C string; if payloads are not null-terminated, output may include extra bytes.
 - The project is configured for STM32F40/41 (`-D STM32F40_41xxx`) and uses hard-float ABI.
@@ -62,33 +90,4 @@ This uses `bin/console` with the built S19 file.
 make clean
 ```
 
-## Lab 1 Introduction
-
-### Problem 1:
-Demonstrate the audible 1 kHz output, as well as the volume
-control and mute functionality.
-Answer:
-
-**audible output**
-after we launch this program, it will generate 1kHz optput, using the following function.
-``` c
-AFTER(USEC(500), self, tone_generator, next_state);
-```
-The time intervel is set to 500us, we will get 1 kHz output.
-
-- Type letter 'e': enter volume control mode
-- Type letter 's': mute device
-- Type letter 'b': adjusting background load
-
-**volume control**
-
-In volume control mode, if user types 'e', it will exit volume control mode, return to main menu.
-
-If the user type a number in range of 0 - 20, this value will be saved to `self.val`. In the period task, tone_generator will make the value as its actual output.
-
-### problem 2a:
-
-In background load adjusting mode, if user types 'e', it will exit this mode and return to the main menu.
-
-If user types '+', the background load value will increase 500. If user types '-', the background load value will decrease 500. The range of background load value is 0 - 8000.
 
