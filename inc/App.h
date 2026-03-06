@@ -30,13 +30,31 @@ typedef struct
   int tempo;         // length to play
   int mute;          // indicate mute or not
   int status;        // indicate if the tone generator is already running
+
+  // USER button state
+  Timer button_clock;
+  Timer button_callback_timer;
+  Timer button_press_timer;
+  Msg button_hold_msg;
+  Time button_press_start;
+  Time button_last_momentary_start;
+  int button_has_last_callback;
+  int button_has_last_momentary;
+  int button_down;
+  int button_hold_mode;
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, CONDUCTOR_ROLE, 0, 0, 120, 1, 0}
+#define initApp()                                                              \
+  {                                                                            \
+    initObject(), {0}, 0, CONTROL_MODE, CONDUCTOR_ROLE, 0, 0, 120, 1, 0,      \
+        initTimer(), initTimer(), initTimer(), NULL, 0, 0, 0, 0, 0, 0         \
+  }
 
 void reader(App *, int);
 void receiver(App *, int);
 void startApp(App *, int);
+void user_button_event(App *, int);
+void user_button_hold_timeout(App *, int);
 
 void play_note(App *, int);
 void stop_note(App *, int);

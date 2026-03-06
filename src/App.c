@@ -2,6 +2,7 @@
 #include "TinyTimber.h"
 #include "canTinyTimber.h"
 #include "sciTinyTimber.h"
+#include "sioTinyTimber.h"
 
 // custom incl
 #include <stdint.h>
@@ -60,10 +61,13 @@ extern App app;
 extern ToneTask tone_task;
 extern Can can0;
 extern Serial sci0;
+extern SysIO sio0;
 
 // internal helper function
 void int_to_string(int n, char *buffer);
 void print_can_message(char *direction, CANMsg *msg);
+int time_to_ms(Time t);
+void print_hold_duration_seconds(Time duration);
 
 int clamp(int value, int min, int max)
 {
@@ -276,6 +280,33 @@ void int_to_string(int n, char *buffer)
     buffer[j] = buffer[i - j - 1];
     buffer[i - j - 1] = temp;
   }
+}
+
+int time_to_ms(Time t)
+{
+  return (int)(t / MSEC(1));
+}
+
+void print_hold_duration_seconds(Time duration)
+{
+  char sec_buf[12];
+  char ms_buf[8];
+
+  int sec = SEC_OF(duration);
+  int ms = MSEC_OF(duration);
+
+  int_to_string(sec, sec_buf);
+
+  ms_buf[0] = (char)('0' + ((ms / 100) % 10));
+  ms_buf[1] = (char)('0' + ((ms / 10) % 10));
+  ms_buf[2] = (char)('0' + (ms % 10));
+  ms_buf[3] = '\0';
+
+  SCI_WRITE(&sci0, "USER button hold duration: ");
+  SCI_WRITE(&sci0, sec_buf);
+  SCI_WRITE(&sci0, ".");
+  SCI_WRITE(&sci0, ms_buf);
+  SCI_WRITE(&sci0, " s\n");
 }
 
 // print the helper
@@ -732,12 +763,131 @@ void reader(App *self, int c)
   command_handler(self, (char)c);
 }
 
+void user_button_hold_timeout(App *self, int unused)
+{
+  (void)unused;
+  self->button_hold_msg = NULL;
+
+  if (self->button_down && SIO_READ(&sio0) == 0 && !self->button_hold_mode)
+  {
+    self->button_hold_mode = 1;
+    SCI_WRITE(&sci0, "Entered USER button press-and-hold mode\n");
+  }
+}
+
+void user_button_event(App *self, int unused)
+{
+  (void)unused;
+  int is_pressed = (SIO_READ(&sio0) == 0);
+  int is_bounce = 0;
+
+  if (self->button_has_last_callback)
+  {
+    Time inter_callback = T_SAMPLE(&self->button_callback_timer);
+    T_RESET(&self->button_callback_timer);
+    if (inter_callback < MSEC(100))
+    {
+      is_bounce = 1;
+    }
+  }
+  else
+  {
+    T_RESET(&self->button_callback_timer);
+    self->button_has_last_callback = 1;
+  }
+
+  if (is_pressed)
+  {
+    if (self->button_down)
+    {
+      SIO_TRIG(&sio0, 1);
+      return;
+    }
+
+    if (is_bounce)
+    {
+      SIO_TRIG(&sio0, 0);
+      return;
+    }
+
+    self->button_down = 1;
+    self->button_press_start = T_SAMPLE(&self->button_clock);
+    T_RESET(&self->button_press_timer);
+
+    if (self->button_hold_msg)
+    {
+      ABORT(self->button_hold_msg);
+      self->button_hold_msg = NULL;
+    }
+    self->button_hold_msg = AFTER(SEC(1), self, user_button_hold_timeout, 0);
+
+    SIO_TRIG(&sio0, 1);
+    return;
+  }
+
+  if (!self->button_down)
+  {
+    SIO_TRIG(&sio0, 0);
+    return;
+  }
+
+  if (self->button_hold_msg)
+  {
+    ABORT(self->button_hold_msg);
+    self->button_hold_msg = NULL;
+  }
+
+  Time pressed_duration = T_SAMPLE(&self->button_press_timer);
+
+  self->button_down = 0;
+  SIO_TRIG(&sio0, 0);
+
+  if (is_bounce)
+  {
+    self->button_hold_mode = 0;
+    return;
+  }
+
+  if (self->button_hold_mode)
+  {
+    self->button_hold_mode = 0;
+    print_hold_duration_seconds(pressed_duration);
+  }
+  else
+  {
+    if (self->button_has_last_momentary)
+    {
+      char ms_buf[16];
+      Time inter_arrival = self->button_press_start - self->button_last_momentary_start;
+      int_to_string(time_to_ms(inter_arrival), ms_buf);
+      SCI_WRITE(&sci0, "USER button inter-arrival: ");
+      SCI_WRITE(&sci0, ms_buf);
+      SCI_WRITE(&sci0, " ms\n");
+    }
+    else
+    {
+      SCI_WRITE(&sci0, "USER button first valid momentary activation\n");
+    }
+    self->button_last_momentary_start = self->button_press_start;
+    self->button_has_last_momentary = 1;
+  }
+}
+
 void startApp(App *self, int arg)
 {
   (void)arg;
 
   CAN_INIT(&can0);
   SCI_INIT(&sci0);
+  SIO_INIT(&sio0);
+  SIO_TRIG(&sio0, 0);
+
+  T_RESET(&self->button_clock);
+  self->button_has_last_callback = 0;
+  self->button_has_last_momentary = 0;
+  self->button_down = 0;
+  self->button_hold_mode = 0;
+  self->button_hold_msg = NULL;
 
   SYNC(&tone_task, tone_set_period, 1136);
   SYNC(&tone_task, tone_set_mute, 1);
@@ -751,6 +901,7 @@ int main()
 {
   INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
   INSTALL(&can0, can_interrupt, CAN_IRQ0);
+  INSTALL(&sio0, sio_interrupt, SIO_IRQ0);
   TINYTIMBER(&app, startApp, 0);
   return 0;
 }
