@@ -4,10 +4,9 @@ Embedded TinyTimber application for the MD407 (STM32F4, Cortex-M4) board using C
 
 ## What this project does
 - Initializes CAN and SCI peripherals
-- Prints a greeting over SCI
-- Sends a "Hello" CAN message on startup
-- Echoes received SCI characters
-- Prints received CAN payloads over SCI
+- Runs in `conductor` or `musician` role
+- In conductor role: keyboard commands control local playback and broadcast CAN control commands
+- In musician role: playback/settings are applied only when CAN messages are received
 
 ## Repository layout
 - `src/` application sources (`App.c`, `objects.c`)
@@ -60,6 +59,12 @@ Type a command, then press `Enter`.
 - `p` or `play`: play the melody
 - `q` or `stop`: stop the melody
 
+### Role commands
+- `c` or `conductor`: switch to conductor role
+- `m` or `musician`: switch to musician role
+
+In musician role, keyboard commands are sent as CAN control messages (for loopback testing), but are not applied directly unless received over CAN.
+
 ### Settings commands
 - `t` or `tempo`: enter tempo-setting mode (valid range `60-240` BPM)
 - `k` or `key`: enter key-setting mode (valid range `-5` to `+5`)
@@ -81,7 +86,8 @@ Input normalization and limits:
 - `key` values are clamped to `-5..5`
 
 ## Notes
-- The CAN receive handler prints `msg.buff` as a C string; if payloads are not null-terminated, output may include extra bytes.
+- CAN message ID `1` is used for player control broadcasts.
+- CAN messages are logged in the console as both `CAN TX` and `CAN RX` (msgId/nodeId/len/cmd/value).
 - The project is configured for STM32F40/41 (`-D STM32F40_41xxx`) and uses hard-float ABI.
 
 ## Clean
@@ -89,5 +95,3 @@ Input normalization and limits:
 ```sh
 make clean
 ```
-
-

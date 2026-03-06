@@ -12,12 +12,19 @@ typedef enum
   TEMPO_MODE = 3
 } Mode;
 
+typedef enum
+{
+  CONDUCTOR_ROLE = 0,
+  MUSICIAN_ROLE = 1
+} Role;
+
 typedef struct
 {
   Object super;
   char buffer[32]; // receive command
   int buffer_pos;  // pointer to buffer position
   int mode;
+  int role;
   int current_index; // current tone index to play
   int key;           // shifted key
   int tempo;         // length to play
@@ -25,7 +32,7 @@ typedef struct
   int status;        // indicate if the tone generator is already running
 } App;
 
-#define initApp() {initObject(), {0}, 0, 0, 0, 0, 120, 0, 1}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, CONDUCTOR_ROLE, 0, 0, 120, 1, 0}
 
 void reader(App *, int);
 void receiver(App *, int);
