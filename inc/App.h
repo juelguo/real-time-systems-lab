@@ -57,6 +57,6 @@ void tone_set_period(ToneTask *, int);
 void tone_set_volume(ToneTask *, int);
 
 // get method
-int tone_get_volume(ToneTask *);
+int tone_get_volume(ToneTask *, int);
 
 #endif

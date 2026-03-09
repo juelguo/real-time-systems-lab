@@ -40,7 +40,7 @@ const int MIN_SHIFT = -10;
 #define MAX_TEMPO 240
 #define MIN_KEY -5
 #define MAX_KEY 5
-#define DEFAULT_UNMUTE_VOLUME 15
+#define DEFAULT_VOLUME 8
 
 #define CAN_MSG_PLAYER_CONTROL 1
 #define CAN_NODE_BROADCAST 0x0F
@@ -60,6 +60,9 @@ extern App app;
 extern ToneTask tone_task;
 extern Can can0;
 extern Serial sci0;
+
+static int output_muted = 0;
+static int volume_before_output_mute = DEFAULT_VOLUME;
 
 // internal helper function
 void int_to_string(int n, char *buffer);
@@ -107,18 +110,33 @@ int apply_key(App *self, int key)
 int apply_volume(int volume)
 {
   int clamped = clamp(volume, MIN_VOLUME, MAX_VOLUME);
-  SYNC(&tone_task, tone_set_volume, clamped);
+  volume_before_output_mute = clamped;
+  if (!output_muted)
+  {
+    SYNC(&tone_task, tone_set_volume, clamped);
+  }
   return clamped;
 }
 
 void apply_output_mute(void)
 {
+  if (output_muted)
+  {
+    return;
+  }
+  volume_before_output_mute = clamp(SYNC(&tone_task, tone_get_volume, 0), MIN_VOLUME, MAX_VOLUME);
+  output_muted = 1;
   SYNC(&tone_task, tone_set_volume, 0);
 }
 
 void apply_output_unmute(void)
 {
-  SYNC(&tone_task, tone_set_volume, DEFAULT_UNMUTE_VOLUME);
+  if (!output_muted)
+  {
+    return;
+  }
+  output_muted = 0;
+  SYNC(&tone_task, tone_set_volume, clamp(volume_before_output_mute, MIN_VOLUME, MAX_VOLUME));
 }
 
 void send_can_player_command(App *self, CanCommand command, int value)
@@ -333,8 +351,9 @@ void tone_set_period(ToneTask *self, int value)
   self->period = value;
 }
 
-int tone_get_volume(ToneTask *self)
+int tone_get_volume(ToneTask *self, int unused)
 {
+  (void)unused;
   return self->val;
 }
 
@@ -351,7 +370,7 @@ void tone_generator(ToneTask *self, int state, int period)
 
   if (next_state == 1)
   {
-    DAC_PORT = tone_get_volume(self);
+    DAC_PORT = tone_get_volume(self, 0);
   }
   else
   {
