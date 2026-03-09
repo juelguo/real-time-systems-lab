@@ -30,6 +30,10 @@ typedef struct
   int tempo;         // length to play
   int mute;          // indicate mute or not
   int status;        // indicate if the tone generator is already running
+  Timer beat_clock;
+  Msg beat_tick_msg;
+  Msg led_off_msg;
+  int led_is_on;
 
   // USER button state
   Timer button_clock;
@@ -38,6 +42,8 @@ typedef struct
   Msg button_hold_msg;
   Time button_press_start;
   Time button_last_momentary_start;
+  Time tap_intervals[3];
+  int tap_activation_count;
   int button_has_last_callback;
   int button_has_last_momentary;
   int button_down;
@@ -47,7 +53,8 @@ typedef struct
 #define initApp()                                                              \
   {                                                                            \
     initObject(), {0}, 0, CONTROL_MODE, CONDUCTOR_ROLE, 0, 0, 120, 1, 0,      \
-        initTimer(), initTimer(), initTimer(), NULL, 0, 0, 0, 0, 0, 0         \
+        initTimer(), NULL, NULL, 0, initTimer(), initTimer(), initTimer(),     \
+        NULL, 0, 0, {0, 0, 0}, 0, 0, 0, 0, 0                                   \
   }
 
 void reader(App *, int);
@@ -58,6 +65,8 @@ void user_button_hold_timeout(App *, int);
 
 void play_note(App *, int);
 void stop_note(App *, int);
+void beat_tick(App *, int);
+void led_off(App *, int);
 
 typedef struct
 {
