@@ -2,7 +2,6 @@
 #include "TinyTimber.h"
 #include "canTinyTimber.h"
 #include "sciTinyTimber.h"
-#include "sioTinyTimber.h"
 
 // custom incl
 #include <stdint.h>
@@ -41,10 +40,7 @@ const int MIN_SHIFT = -10;
 #define MAX_TEMPO 240
 #define MIN_KEY -5
 #define MAX_KEY 5
-#define DEFAULT_UNMUTE_VOLUME 15
-#define DEFAULT_TEMPO 120
-#define MIN_TAP_TEMPO 30
-#define MAX_TAP_TEMPO 300
+#define DEFAULT_VOLUME 8
 
 #define CAN_MSG_PLAYER_CONTROL 1
 #define CAN_NODE_BROADCAST 0x0F
@@ -64,17 +60,13 @@ extern App app;
 extern ToneTask tone_task;
 extern Can can0;
 extern Serial sci0;
-extern SysIO sio0;
+
+static int output_muted = 0;
+static int volume_before_output_mute = DEFAULT_VOLUME;
 
 // internal helper function
 void int_to_string(int n, char *buffer);
 void print_can_message(char *direction, CANMsg *msg);
-int time_to_ms(Time t);
-void print_hold_duration_seconds(Time duration);
-void print_tempo_change(char *prefix, int bpm);
-Time beat_interval_for_bpm(int bpm);
-void cancel_led_messages(App *self);
-void reschedule_led_messages(App *self);
 
 int clamp(int value, int min, int max)
 {
@@ -85,108 +77,26 @@ int clamp(int value, int min, int max)
   return value;
 }
 
-Time beat_interval_for_bpm(int bpm)
-{
-  int safe_bpm = bpm;
-  if (safe_bpm < 1)
-  {
-    safe_bpm = 1;
-  }
-
-  int beat_ms = (60000 + (safe_bpm / 2)) / safe_bpm;
-  if (beat_ms < 1)
-  {
-    beat_ms = 1;
-  }
-
-  return MSEC(beat_ms);
-}
-
-void cancel_led_messages(App *self)
-{
-  if (self->beat_tick_msg != NULL)
-  {
-    ABORT(self->beat_tick_msg);
-    self->beat_tick_msg = NULL;
-  }
-
-  if (self->led_off_msg != NULL)
-  {
-    ABORT(self->led_off_msg);
-    self->led_off_msg = NULL;
-  }
-}
-
-void reschedule_led_messages(App *self)
-{
-  if (self->status == 0 || self->mute == 1)
-  {
-    return;
-  }
-
-  Time beat_interval = beat_interval_for_bpm(self->tempo);
-  Time half_beat_interval = beat_interval / 2;
-  Time elapsed_since_beat = T_SAMPLE(&self->beat_clock);
-
-  if (elapsed_since_beat < 0)
-  {
-    elapsed_since_beat = 0;
-  }
-
-  cancel_led_messages(self);
-
-  if (elapsed_since_beat >= beat_interval)
-  {
-    self->beat_tick_msg = AFTER((Time)0, self, beat_tick, 0);
-    return;
-  }
-
-  if (elapsed_since_beat < half_beat_interval)
-  {
-    if (self->led_is_on == 0)
-    {
-      SIO_WRITE(&sio0, 0);
-      self->led_is_on = 1;
-    }
-    self->led_off_msg = AFTER(half_beat_interval - elapsed_since_beat, self, led_off, 0);
-  }
-  else
-  {
-    SIO_WRITE(&sio0, 1);
-    self->led_is_on = 0;
-  }
-
-  self->beat_tick_msg = AFTER(beat_interval - elapsed_since_beat, self, beat_tick, 0);
-}
-
 void apply_play(App *self)
 {
+  self->play_session++;
   self->current_index = 0;
   self->mute = 0;
-  if (self->status == 0)
-  {
-    cancel_led_messages(self);
-    self->status = 1;
-    self->led_is_on = 0;
-    ASYNC(self, beat_tick, 0);
-    ASYNC(self, play_note, 0);
-  }
+  self->status = 1;
+  ASYNC(self, play_note, self->play_session);
 }
 
 void apply_stop(App *self)
 {
+  self->play_session++;
   self->mute = 1;
   self->status = 0;
-  cancel_led_messages(self);
-  SIO_WRITE(&sio0, 1);
-  self->led_is_on = 0;
   SYNC(&tone_task, tone_set_mute, 1);
 }
 
 int apply_tempo(App *self, int tempo)
 {
   self->tempo = clamp(tempo, MIN_TEMPO, MAX_TEMPO);
-  reschedule_led_messages(self);
   return self->tempo;
 }
 
@@ -199,18 +109,33 @@ int apply_key(App *self, int key)
 int apply_volume(int volume)
 {
   int clamped = clamp(volume, MIN_VOLUME, MAX_VOLUME);
-  SYNC(&tone_task, tone_set_volume, clamped);
+  volume_before_output_mute = clamped;
+  if (!output_muted)
+  {
+    SYNC(&tone_task, tone_set_volume, clamped);
+  }
   return clamped;
 }
 
 void apply_output_mute(void)
 {
+  if (output_muted)
+  {
+    return;
+  }
+  volume_before_output_mute = clamp(SYNC(&tone_task, tone_get_volume, 0), MIN_VOLUME, MAX_VOLUME);
+  output_muted = 1;
   SYNC(&tone_task, tone_set_volume, 0);
 }
 
 void apply_output_unmute(void)
 {
-  SYNC(&tone_task, tone_set_volume, DEFAULT_UNMUTE_VOLUME);
+  if (!output_muted)
+  {
+    return;
+  }
+  output_muted = 0;
+  SYNC(&tone_task, tone_set_volume, clamp(volume_before_output_mute, MIN_VOLUME, MAX_VOLUME));
 }
 
 void send_can_player_command(App *self, CanCommand command, int value)
@@ -370,43 +295,6 @@ void int_to_string(int n, char *buffer)
   }
 }
 
-int time_to_ms(Time t)
-{
-  return (int)(t / MSEC(1));
-}
-
-void print_hold_duration_seconds(Time duration)
-{
-  char sec_buf[12];
-  char ms_buf[8];
-
-  int sec = SEC_OF(duration);
-  int ms = MSEC_OF(duration);
-
-  int_to_string(sec, sec_buf);
-
-  ms_buf[0] = (char)('0' + ((ms / 100) % 10));
-  ms_buf[1] = (char)('0' + ((ms / 10) % 10));
-  ms_buf[2] = (char)('0' + (ms % 10));
-  ms_buf[3] = '\0';
-
-  SCI_WRITE(&sci0, "USER button hold duration: ");
-  SCI_WRITE(&sci0, sec_buf);
-  SCI_WRITE(&sci0, ".");
-  SCI_WRITE(&sci0, ms_buf);
-  SCI_WRITE(&sci0, " s\n");
-}
-
-void print_tempo_change(char *prefix, int bpm)
-{
-  char bpm_buf[12];
-  int_to_string(bpm, bpm_buf);
-
-  SCI_WRITE(&sci0, prefix);
-  SCI_WRITE(&sci0, bpm_buf);
-  SCI_WRITE(&sci0, " bpm\n");
-}
-
 // print the helper
 void print_helper(App *self)
 {
@@ -438,8 +326,6 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  s | mute              Mute tone output\n");
   SCI_WRITE(&sci0, "  r | unmute            Resume tone output\n");
   SCI_WRITE(&sci0, "  h | help              Show this menu\n");
-  SCI_WRITE(&sci0, "  USER button:          4 taps set tempo (30-300 bpm)\n");
-  SCI_WRITE(&sci0, "                        Hold for 2s resets tempo to 120 bpm\n");
 
   SCI_WRITE(&sci0, "\nIn Settings Mode (tempo/key/volume):\n");
   SCI_WRITE(&sci0, "  Type a number and press Enter\n");
@@ -464,8 +350,9 @@ void tone_set_period(ToneTask *self, int value)
   self->period = value;
 }
 
-int tone_get_volume(ToneTask *self)
+int tone_get_volume(ToneTask *self, int unused)
 {
+  (void)unused;
   return self->val;
 }
 
@@ -482,7 +369,7 @@ void tone_generator(ToneTask *self, int state, int period)
 
   if (next_state == 1)
   {
-    DAC_PORT = tone_get_volume(self);
+    DAC_PORT = tone_get_volume(self, 0);
   }
   else
   {
@@ -492,46 +379,10 @@ void tone_generator(ToneTask *self, int state, int period)
   SEND(USEC(self->period), USEC(100), self, tone_generator, next_state);
 }
 
-void beat_tick(App *self, int unused)
-{
-  (void)unused;
-
-  if (self->status == 0 || self->mute == 1)
-  {
-    return;
-  }
-
-  Time beat_interval = beat_interval_for_bpm(self->tempo);
-  Time half_beat_interval = beat_interval / 2;
-
-  self->beat_tick_msg = NULL;
-
-  SIO_WRITE(&sio0, 0);
-  self->led_is_on = 1;
-  T_RESET(&self->beat_clock);
-
-  if (self->led_off_msg != NULL)
-  {
-    ABORT(self->led_off_msg);
-    self->led_off_msg = NULL;
-  }
-
-  self->led_off_msg = AFTER(half_beat_interval, self, led_off, 0);
-  self->beat_tick_msg = AFTER(beat_interval, self, beat_tick, 0);
-}
-
-void led_off(App *self, int unused)
-{
-  (void)unused;
-
-  self->led_off_msg = NULL;
-  SIO_WRITE(&sio0, 1);
-  self->led_is_on = 0;
-}
-
 void play_note(App *self, int unused)
 {
-  if (self->mute == 1)
+  int session = unused;
+  if (session != self->play_session || self->mute == 1 || self->status == 0)
   {
     return;
   }
@@ -549,12 +400,13 @@ void play_note(App *self, int unused)
   SYNC(&tone_task, tone_set_period, current_period);
   SYNC(&tone_task, tone_set_mute, 0);
 
-  SEND(MSEC(active_play_time), MSEC(2), self, stop_note, 0);
+  SEND(MSEC(active_play_time), MSEC(2), self, stop_note, session);
 }
 
 void stop_note(App *self, int unused)
 {
-  if (self->mute == 1)
+  int session = unused;
+  if (session != self->play_session || self->mute == 1 || self->status == 0)
   {
     return;
   }
@@ -563,7 +415,7 @@ void stop_note(App *self, int unused)
 
   self->current_index = (self->current_index + 1) % 32;
 
-  SEND(MSEC(50), MSEC(2), self, play_note, 0);
+  SEND(MSEC(50), MSEC(2), self, play_note, session);
 }
 
 // this function id for can message receiver
@@ -900,194 +752,12 @@ void reader(App *self, int c)
   command_handler(self, (char)c);
 }
 
-void user_button_hold_timeout(App *self, int unused)
-{
-  (void)unused;
-  self->button_hold_msg = NULL;
-
-  if (self->button_down && SIO_READ(&sio0) == 0 && !self->button_hold_mode)
-  {
-    self->button_hold_mode = 1;
-    self->tap_activation_count = 0;
-    SCI_WRITE(&sci0, "Entered USER button press-and-hold mode\n");
-  }
-}
-
-void user_button_event(App *self, int unused)
-{
-  (void)unused;
-  int is_pressed = (SIO_READ(&sio0) == 0);
-  int is_bounce = 0;
-
-  if (self->button_has_last_callback)
-  {
-    Time inter_callback = T_SAMPLE(&self->button_callback_timer);
-    T_RESET(&self->button_callback_timer);
-    if (inter_callback < MSEC(100))
-    {
-      is_bounce = 1;
-    }
-  }
-  else
-  {
-    T_RESET(&self->button_callback_timer);
-    self->button_has_last_callback = 1;
-  }
-
-  if (is_pressed)
-  {
-    if (self->button_down)
-    {
-      SIO_TRIG(&sio0, 1);
-      return;
-    }
-
-    if (is_bounce)
-    {
-      SIO_TRIG(&sio0, 0);
-      return;
-    }
-
-    self->button_down = 1;
-    self->button_press_start = T_SAMPLE(&self->button_clock);
-    T_RESET(&self->button_press_timer);
-
-    if (self->button_hold_msg)
-    {
-      ABORT(self->button_hold_msg);
-      self->button_hold_msg = NULL;
-    }
-    self->button_hold_msg = AFTER(SEC(1), self, user_button_hold_timeout, 0);
-
-    SIO_TRIG(&sio0, 1);
-    return;
-  }
-
-  if (!self->button_down)
-  {
-    SIO_TRIG(&sio0, 0);
-    return;
-  }
-
-  if (self->button_hold_msg)
-  {
-    ABORT(self->button_hold_msg);
-    self->button_hold_msg = NULL;
-  }
-
-  Time pressed_duration = T_SAMPLE(&self->button_press_timer);
-
-  self->button_down = 0;
-  SIO_TRIG(&sio0, 0);
-
-  if (is_bounce)
-  {
-    self->button_hold_mode = 0;
-    return;
-  }
-
-  if (self->button_hold_mode)
-  {
-    self->button_hold_mode = 0;
-    self->tap_activation_count = 0;
-    print_hold_duration_seconds(pressed_duration);
-
-    if (pressed_duration >= SEC(2))
-    {
-      apply_tempo(self, DEFAULT_TEMPO);
-      print_tempo_change("Tempo reset to default: ", self->tempo);
-    }
-  }
-  else
-  {
-    Time inter_arrival = (Time)0;
-
-    if (self->button_has_last_momentary)
-    {
-      char ms_buf[16];
-      inter_arrival = self->button_press_start - self->button_last_momentary_start;
-      int_to_string(time_to_ms(inter_arrival), ms_buf);
-      SCI_WRITE(&sci0, "USER button inter-arrival: ");
-      SCI_WRITE(&sci0, ms_buf);
-      SCI_WRITE(&sci0, " ms\n");
-
-      if (self->tap_activation_count >= 1 && self->tap_activation_count <= 3)
-      {
-        self->tap_intervals[self->tap_activation_count - 1] = inter_arrival;
-      }
-    }
-    else
-    {
-      self->tap_activation_count = 0;
-      SCI_WRITE(&sci0, "USER button first valid momentary activation\n");
-    }
-
-    self->tap_activation_count++;
-
-    if (self->tap_activation_count == 4)
-    {
-      Time min_interval = self->tap_intervals[0];
-      Time max_interval = self->tap_intervals[0];
-
-      for (int i = 1; i < 3; i++)
-      {
-        if (self->tap_intervals[i] < min_interval)
-        {
-          min_interval = self->tap_intervals[i];
-        }
-        if (self->tap_intervals[i] > max_interval)
-        {
-          max_interval = self->tap_intervals[i];
-        }
-      }
-
-      if (max_interval - min_interval <= MSEC(100))
-      {
-        Time avg_interval = (self->tap_intervals[0] + self->tap_intervals[1] + self->tap_intervals[2]) / 3;
-        int avg_ms = time_to_ms(avg_interval);
-        if (avg_ms > 0)
-        {
-          int bpm = (60000 + (avg_ms / 2)) / avg_ms;
-          bpm = clamp(bpm, MIN_TAP_TEMPO, MAX_TAP_TEMPO);
-          self->tempo = bpm;
-          reschedule_led_messages(self);
-          print_tempo_change("Tap tempo set to: ", bpm);
-        }
-      }
-      else
-      {
-        SCI_WRITE(&sci0, "Tap tempo burst rejected: intervals differ by more than 100 ms\n");
-      }
-
-      self->tap_activation_count = 0;
-    }
-
-    self->button_last_momentary_start = self->button_press_start;
-    self->button_has_last_momentary = 1;
-  }
-}
-
 void startApp(App *self, int arg)
 {
   (void)arg;
 
   CAN_INIT(&can0);
   SCI_INIT(&sci0);
-  SIO_INIT(&sio0);
-  SIO_TRIG(&sio0, 0);
-
-  T_RESET(&self->button_clock);
-  T_RESET(&self->beat_clock);
-  self->button_has_last_callback = 0;
-  self->button_has_last_momentary = 0;
-  self->tap_activation_count = 0;
-  self->button_down = 0;
-  self->button_hold_mode = 0;
-  self->button_hold_msg = NULL;
-  self->beat_tick_msg = NULL;
-  self->led_off_msg = NULL;
-  self->led_is_on = 0;
-  SIO_WRITE(&sio0, 1);
 
   SYNC(&tone_task, tone_set_period, 1136);
   SYNC(&tone_task, tone_set_mute, 1);
@@ -1101,7 +771,6 @@ int main()
 {
   INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
   INSTALL(&can0, can_interrupt, CAN_IRQ0);
-  INSTALL(&sio0, sio_interrupt, SIO_IRQ0);
   TINYTIMBER(&app, startApp, 0);
   return 0;
 }
