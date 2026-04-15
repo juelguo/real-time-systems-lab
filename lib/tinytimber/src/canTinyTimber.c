@@ -18,7 +18,8 @@ void can_init(Can *self, int unused) {
   DUMP("NOTE: CAN running in loopback mode!\n\r");
 #endif
 
-  //#define	__CAN_TxAck // if defined: single transmission, can_send() will
+  // make CAN device running in a more reliable mode by detecting if the message is sent successfully or not.
+  #define	__CAN_TxAck // if defined: single transmission, can_send() will
   // wait for message error or acknowledgement
   //  default: automatic retransmission, can_send() will not wait for message
   //  error or acknowledgement
