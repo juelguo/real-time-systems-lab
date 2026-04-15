@@ -94,7 +94,7 @@ void tone_set_volume(ToneTask *, int);
 
 // get method
 int tone_get_volume(ToneTask *, int);
-void tone_generator(ToneTask *, int, int);
+int tone_generator(ToneTask *, int);
 
 extern App app;
 extern ToneTask tone_task;

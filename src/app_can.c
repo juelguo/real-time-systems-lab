@@ -111,7 +111,7 @@ void print_can_message(char *direction, CANMsg *msg)
   SCI_WRITE(&sci0, "\n");
 }
 
-// this function id for can message receiver
+// this function is for can message receiver
 void receiver(App *self, int unused)
 {
   (void)unused;

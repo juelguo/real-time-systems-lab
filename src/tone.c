@@ -26,15 +26,14 @@ int tone_get_volume(ToneTask *self, int unused)
   return self->val;
 }
 
-void tone_generator(ToneTask *self, int state, int period)
+int tone_generator(ToneTask *self, int state)
 {
-  (void)period;
   if (self->mute == 1)
   {
     /* Keep scheduling while muted so playback can resume immediately. */
     DAC_PORT = 0;
     SEND(USEC(self->period), USEC(100), self, tone_generator, state);
-    return;
+    return 0;
   }
 
   /* Alternate between 0 and the configured amplitude to create the waveform. */
@@ -50,4 +49,5 @@ void tone_generator(ToneTask *self, int state, int period)
   }
 
   SEND(USEC(self->period), USEC(100), self, tone_generator, next_state);
+  return 0;
 }
