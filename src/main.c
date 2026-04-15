@@ -5,6 +5,12 @@
 #include "sciTinyTimber.h"
 #include "App.h"
 
+void app_initialization(App *self)
+{
+  mark_board_up(self, self->node_id);
+  send_discovery_ping(self);
+}
+
 void startApp(App *self, int arg)
 {
   (void)arg;
@@ -16,6 +22,12 @@ void startApp(App *self, int arg)
   /* Start in a silent state until playback is explicitly requested. */
   SYNC(&tone_task, tone_set_period, 1136);
   SYNC(&tone_task, tone_set_mute, 1);
+
+  app_initialization(self);
+  ASYNC(self, periodic_heartbeat, 0);
+  ASYNC(self, check_board_timeouts, 0);
+  ASYNC(self, periodic_tempo_report, 0);
+  ASYNC(self, periodic_muted_report, 0);
 
   print_helper(self);
 
