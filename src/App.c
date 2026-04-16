@@ -67,6 +67,8 @@ static unsigned int rand_state = 12345u;
 
 // internal helper function
 void int_to_string(int n, char *buffer);
+static char *can_msg_name(int msgId);
+static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
 
 static unsigned int simple_rand(void)
 {
@@ -153,19 +155,23 @@ static int can_send_raw(int msgId, int nodeId, uchar *data, int len)
   msg.nodeId = (uchar)nodeId;
   msg.length = (uchar)len;
   for (int i = 0; i < len; i++) msg.buff[i] = data[i];
-  return CAN_SEND(&can0, &msg);
+
+  int status = CAN_SEND(&can0, &msg);
+  if (status == 0)
+    print_can_msg_with_prefix("Sent", &msg);
+  return status;
 }
 
 static void send_discovery_ping(App *self)
 {
-  uchar d[1]; d[0] = (uchar)self->node_id;
-  can_send_raw(CAN_MSG_DISCOVERY_PING, CAN_NODE_BROADCAST, d, 1);
+  can_send_raw(CAN_MSG_DISCOVERY_PING, self->node_id, 0, 0);
 }
 
 static void send_discovery_reply(App *self, int to_node)
 {
+  (void)to_node;
   uchar d[1]; d[0] = (uchar)self->node_id;
-  can_send_raw(CAN_MSG_DISCOVERY_REPLY, to_node, d, 1);
+  can_send_raw(CAN_MSG_DISCOVERY_REPLY, self->node_id, d, 1);
 }
 
 static void send_conductor_announce(App *self)
@@ -174,7 +180,7 @@ static void send_conductor_announce(App *self)
   d[0] = (uchar)self->node_id;
   for (int i = 0; i < self->active_count && i < 16; i++)
     d[1+i] = (uchar)self->active_nodes[i];
-  can_send_raw(CAN_MSG_CONDUCTOR_ANNOUNCE, CAN_NODE_BROADCAST, d, 1 + self->active_count);
+  can_send_raw(CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1 + self->active_count);
 }
 
 static void send_token(App *self, int next_note_index)
@@ -190,19 +196,70 @@ static void send_token(App *self, int next_note_index)
   uchar d[2];
   d[0] = (uchar)((next_note_index >> 8) & 0xFF);
   d[1] = (uchar)(next_note_index & 0xFF);
-  can_send_raw(CAN_MSG_TOKEN, CAN_NODE_BROADCAST, d, 2);
+  can_send_raw(CAN_MSG_TOKEN, self->node_id, d, 2);
 }
 
 static void send_heartbeat_now(App *self)
 {
   uchar d[1]; d[0] = (uchar)self->node_id;
-  can_send_raw(CAN_MSG_HEARTBEAT, CAN_NODE_BROADCAST, d, 1);
+  can_send_raw(CAN_MSG_HEARTBEAT, self->node_id, d, 1);
 }
 
 static void send_conductor_cmd(App *self, int sub, int val)
 {
   uchar d[2]; d[0] = (uchar)sub; d[1] = (uchar)val;
-  can_send_raw(CAN_MSG_CONDUCTOR_CMD, CAN_NODE_BROADCAST, d, 2);
+  can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 2);
+}
+
+static char *can_msg_name(int msgId)
+{
+  if (msgId == CAN_MSG_CONDUCTOR_CMD) return "CONDUCTOR_CMD";
+  if (msgId == CAN_MSG_DISCOVERY_PING) return "DISCOVERY_PING";
+  if (msgId == CAN_MSG_DISCOVERY_REPLY) return "DISCOVERY_REPLY";
+  if (msgId == CAN_MSG_CONDUCTOR_ANNOUNCE) return "CONDUCTOR_ANNOUNCE";
+  if (msgId == CAN_MSG_TOKEN) return "TOKEN";
+  if (msgId == CAN_MSG_HEARTBEAT) return "HEARTBEAT";
+  return "UNKNOWN";
+}
+
+static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg)
+{
+  char tmp[12];
+
+  SCI_WRITE(&sci0, "\n");
+  SCI_WRITE(&sci0, prefix);
+  SCI_WRITE(&sci0, " CAN: ");
+  SCI_WRITE(&sci0, can_msg_name(msg->msgId));
+  SCI_WRITE(&sci0, " [msgId=");
+  int_to_string(msg->msgId, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, ", nodeId=");
+  int_to_string(msg->nodeId, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, ", length=");
+  int_to_string(msg->length, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, ", data=");
+
+  if (msg->length == 0)
+  {
+    SCI_WRITE(&sci0, "[]\n");
+    return;
+  }
+
+  SCI_WRITE(&sci0, "[");
+  for (int i = 0; i < msg->length; i++)
+  {
+    if (i > 0) SCI_WRITE(&sci0, " ");
+    int_to_string(msg->buff[i], tmp);
+    SCI_WRITE(&sci0, tmp);
+  }
+  SCI_WRITE(&sci0, "]\n");
+}
+
+static void print_can_msg(CANMsg *msg)
+{
+  print_can_msg_with_prefix("Received", msg);
 }
 
 // forward declarations
@@ -400,7 +457,7 @@ void play_one_note(App *self, int note_index)
 
   // start 10ms heartbeat loop while playing
   self->note_hb_session++;
-  SEND(MSEC(10), MSEC(2), self, send_note_hb, self->note_hb_session);
+  SEND(MSEC(100), MSEC(2), self, send_note_hb, self->note_hb_session);
 
   SEND(MSEC(active_time), MSEC(2), self, finish_note, session);
 }
@@ -491,12 +548,12 @@ void discovery_timeout(App *self, int session)
   if (session != self->disc_session) return;
   self->discovery_done = 1;
   // P4: if network is dead (only us responded) and no conductor, become conductor
-  if (self->active_count <= 1 && self->conductor_id == -1)
-  {
-    become_conductor(self, COND_REASON_DEAD);
-    send_conductor_announce(self);
-    send_token(self, 0);
-  }
+  // if (self->active_count <= 1 && self->conductor_id == -1)
+  // {
+  //   become_conductor(self, COND_REASON_DEAD);
+  //   send_conductor_announce(self);
+  //   send_token(self, 0);
+  // }
 }
 
 static void enter_silent_failure(App *self, int mode)
@@ -593,30 +650,41 @@ static void claim_conductorship(App *self)
 
 static void handle_discovery_ping(App *self, CANMsg *msg)
 {
-  if (msg->length < 1) return;
-  int sender = msg->buff[0];
-  add_active_node(self, sender);
+  int sender = msg->nodeId;
+  int was_active = arr_contains(self->active_nodes, self->active_count, sender);
+
   add_known_node(self, sender);
-  if (!self->is_silent)
+  if (!was_active)
+    add_active_node(self, sender);
+
+  // PING doubles as heartbeat. Only reply during discovery of a new node;
+  // active nodes are already known and do not need another REPLY.
+  if (!self->is_silent && !was_active)
     send_discovery_reply(self, sender);
 }
 
 static void handle_discovery_reply(App *self, CANMsg *msg)
 {
-  if (msg->length < 1) return;
-  int sender = msg->buff[0];
+  int sender = msg->nodeId;
+
+  // Keep compatibility with older reply frames that encoded the sender only in buff[0].
+  if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
+    sender = msg->buff[0];
+
   add_active_node(self, sender);
   add_known_node(self, sender);
 }
 
 static void handle_conductor_announce(App *self, CANMsg *msg)
 {
-  if (msg->length < 1) return;
-  int new_cond = msg->buff[0];
+  // if (msg->length < 1) return;
+  int new_cond = msg->nodeId;
   // rebuild active list from announce
   self->active_count = 0;
-  for (int i = 1; i < msg->length; i++)
+  for (int i = 0; i < msg->length; i++)
     arr_insert_sorted(self->active_nodes, &self->active_count, msg->buff[i]);
+  if (!self->is_silent)
+    add_active_node(self, self->node_id);
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
   self->conductor_id = new_cond;
   if (new_cond == self->node_id)
@@ -641,8 +709,8 @@ static void handle_token(App *self, CANMsg *msg)
 
 static void handle_heartbeat(App *self, CANMsg *msg)
 {
-  if (msg->length < 1) return;
-  int sender = msg->buff[0];
+  // if (msg->length < 1) return;
+  int sender = msg->nodeId;
   if (sender == self->conductor_id)
     reset_conductor_wd(self);
   else
@@ -682,8 +750,12 @@ void receiver(App *self, int unused)
   CANMsg msg;
   if (CAN_RECEIVE(&can0, &msg) != 0)
     return;
+  print_can_msg(&msg);
   if (msg.msgId == CAN_MSG_DISCOVERY_PING)
+  {
+
     handle_discovery_ping(self, &msg);
+  }
   else if (msg.msgId == CAN_MSG_DISCOVERY_REPLY)
     handle_discovery_reply(self, &msg);
   else if (msg.msgId == CAN_MSG_CONDUCTOR_ANNOUNCE)
