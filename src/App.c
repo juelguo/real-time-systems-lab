@@ -79,6 +79,11 @@ static int rand_range(int lo, int hi)
   return lo + (int)(simple_rand() % (unsigned int)(hi - lo + 1));
 }
 
+static int is_valid_node_id(int node_id)
+{
+  return node_id >= 0 && node_id <= 14;
+}
+
 static void arr_insert_sorted(int *arr, int *count, int val)
 {
   // don't insert duplicates
@@ -141,14 +146,14 @@ static int lowest_active_nodeId(App *self)
   return self->active_nodes[0];
 }
 
-static void can_send_raw(int msgId, int nodeId, uchar *data, int len)
+static int can_send_raw(int msgId, int nodeId, uchar *data, int len)
 {
   CANMsg msg;
   msg.msgId = msgId;
   msg.nodeId = (uchar)nodeId;
   msg.length = (uchar)len;
   for (int i = 0; i < len; i++) msg.buff[i] = data[i];
-  CAN_SEND(&can0, &msg);
+  return CAN_SEND(&can0, &msg);
 }
 
 static void send_discovery_ping(App *self)
@@ -174,6 +179,14 @@ static void send_conductor_announce(App *self)
 
 static void send_token(App *self, int next_note_index)
 {
+  if (self->active_count == 1 && self->rank == 0)
+  {
+    self->last_token_index = next_note_index;
+    self->last_token_node = self->node_id;
+    play_one_note(self, next_note_index);
+    return;
+  }
+
   uchar d[2];
   d[0] = (uchar)((next_note_index >> 8) & 0xFF);
   d[1] = (uchar)(next_note_index & 0xFF);
@@ -416,7 +429,8 @@ void send_note_hb(App *self, int session)
 {
   if (session != self->note_hb_session) return;
   if (self->is_silent) return;
-  send_heartbeat_now(self);
+  if (self->active_count > 1)
+    send_heartbeat_now(self);
   SEND(MSEC(10), MSEC(2), self, send_note_hb, session);
 }
 
@@ -425,7 +439,8 @@ void send_cond_hb(App *self, int session)
   if (session != self->cond_hb_session) return;
   if (self->is_silent) return;
   if (self->role != CONDUCTOR_ROLE) return;
-  send_heartbeat_now(self);
+  if (self->active_count > 1)
+    send_heartbeat_now(self);
   SEND(MSEC(100), MSEC(5), self, send_cond_hb, session);
 }
 
@@ -463,6 +478,7 @@ static void reset_conductor_wd(App *self)
 
 static void do_discovery(App *self)
 {
+  if (self->node_id < 0) return;
   self->discovery_done = 0;
   self->disc_session++;
   add_active_node(self, self->node_id);
@@ -683,6 +699,8 @@ void receiver(App *self, int unused)
 // print the helper
 void print_helper(App *self)
 {
+  char tmp[12];
+
   SCI_WRITE(&sci0, "\n=== Brother John Music Player ===\n");
   if (self->role == CONDUCTOR_ROLE)
   {
@@ -692,11 +710,22 @@ void print_helper(App *self)
   {
     SCI_WRITE(&sci0, "Board role: MUSICIAN (controlled by incoming CAN commands)\n");
   }
+  SCI_WRITE(&sci0, "Node id: ");
+  if (self->node_id < 0)
+  {
+    SCI_WRITE(&sci0, "UNSET (use 'node <id>' to start discovery)\n");
+  }
+  else
+  {
+    int_to_string(self->node_id, tmp);
+    SCI_WRITE(&sci0, tmp);
+    SCI_WRITE(&sci0, "\n");
+  }
   SCI_WRITE(&sci0, "Enter a command and press Enter.\n");
 
   SCI_WRITE(&sci0, "\nRole Commands:\n");
   SCI_WRITE(&sci0, "  c | conductor         Switch to conductor mode\n");
-  SCI_WRITE(&sci0, "  m | musician          Switch to musician mode\n");
+  SCI_WRITE(&sci0, "  u | musician          Switch to musician mode\n");
 
   SCI_WRITE(&sci0, "\nPlayback Commands:\n");
   SCI_WRITE(&sci0, "  p | play              Play the melody\n");
@@ -713,10 +742,10 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  h | help              Show this menu\n");
 
   SCI_WRITE(&sci0, "\nNetwork Commands:\n");
-  SCI_WRITE(&sci0, "  node <id>             Set this board's node id (before discovery)\n");
+  SCI_WRITE(&sci0, "  node <id>             Set this board's node id and start discovery\n");
   SCI_WRITE(&sci0, "  claim                 Claim conductor role (P2)\n");
   SCI_WRITE(&sci0, "  R                     Reset key and tempo to defaults\n");
-  SCI_WRITE(&sci0, "  M                     Show all boards membership status\n");
+  SCI_WRITE(&sci0, "  m | member            Show all boards membership status\n");
   SCI_WRITE(&sci0, "  I                     Show local node/rank/role info\n");
   SCI_WRITE(&sci0, "  T                     Toggle local audio mute (musician)\n");
   SCI_WRITE(&sci0, "  P                     Toggle periodic tempo/MUTED printing\n");
@@ -801,18 +830,56 @@ void command_handler(App *self, char c)
   if (c == '\n' || c == '\r')
   {
     self->buffer[self->buffer_pos] = '\0';
-    // parse to lower case (if needed?)
-    for (int i = 0; self->buffer[i] != '\0'; i++)
-    {
-      if (self->buffer[i] >= 'A' && self->buffer[i] <= 'Z')
-      {
-        self->buffer[i] = self->buffer[i] - 'A' + 'a';
-      }
-    }
 
     // if we reached the begining of buffer
     if (self->buffer_pos == 0)
     {
+      print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "h") == 0 || strcmp(self->buffer, "help") == 0)
+    {
+      self->buffer_pos = 0;
+      print_helper(self);
+      return;
+    }
+
+    if (strncmp(self->buffer, "node", 4) == 0)
+    {
+      char *arg = self->buffer + 4;
+      char *end = NULL;
+      long id;
+
+      while (*arg == ' ') arg++;
+      id = strtol(arg, &end, 10);
+      while (end != NULL && *end == ' ') end++;
+
+      self->buffer_pos = 0;
+      if (self->node_id >= 0)
+      {
+        SCI_WRITE(&sci0, "\nNode id already configured. Restart to change it.\n");
+        print_helper(self);
+        return;
+      }
+      if (arg == end || end == NULL || *end != '\0' || !is_valid_node_id((int)id))
+      {
+        SCI_WRITE(&sci0, "\nInvalid node id. Use 'node <id>' with 0-14.\n");
+        print_helper(self);
+        return;
+      }
+
+      self->node_id = (int)id;
+      SCI_WRITE(&sci0, "\nNode id set. Starting discovery.\n");
+      do_discovery(self);
+      print_helper(self);
+      return;
+    }
+
+    if (self->node_id < 0)
+    {
+      self->buffer_pos = 0;
+      SCI_WRITE(&sci0, "\nSet node <id> before using network controls.\n");
       print_helper(self);
       return;
     }
@@ -827,20 +894,13 @@ void command_handler(App *self, char c)
       return;
     }
 
-    if (strcmp(self->buffer, "m") == 0 || strcmp(self->buffer, "musician") == 0)
+    if (strcmp(self->buffer, "u") == 0 || strcmp(self->buffer, "musician") == 0)
     {
       self->role = MUSICIAN_ROLE;
       self->mode = CONTROL_MODE;
       self->buffer_pos = 0;
       apply_stop(self);
       SCI_WRITE(&sci0, "\nSwitched to MUSICIAN mode.\n");
-      print_helper(self);
-      return;
-    }
-
-    if (strcmp(self->buffer, "h") == 0 || strcmp(self->buffer, "help") == 0)
-    {
-      self->buffer_pos = 0;
       print_helper(self);
       return;
     }
@@ -878,17 +938,7 @@ void command_handler(App *self, char c)
       leave_silent_failure(self);
       return;
     }
-    if (self->buffer[0] == 'n' && self->buffer[1] == 'o' && self->buffer[2] == 'd' && self->buffer[3] == 'e')
-    {
-      // parse "node <id>"
-      int id = atoi(self->buffer + 5);
-      self->node_id = id;
-      self->buffer_pos = 0;
-      SCI_WRITE(&sci0, "\nNode id set.\n");
-      print_helper(self);
-      return;
-    }
-    if (strcmp(self->buffer, "M") == 0)
+    if (strcmp(self->buffer, "m") == 0 || strcmp(self->buffer, "member") == 0 || strcmp(self->buffer, "membership") == 0)
     {
       // show all known nodes and whether they are active or silent
       self->buffer_pos = 0;
@@ -936,7 +986,10 @@ void command_handler(App *self, char c)
       int_to_string(self->rank, tmp);
       SCI_WRITE(&sci0, tmp);
       SCI_WRITE(&sci0, "  Role: ");
-      SCI_WRITE(&sci0, self->role == CONDUCTOR_ROLE ? "CONDUCTOR" : "MUSICIAN");
+      if (self->role == CONDUCTOR_ROLE)
+        SCI_WRITE(&sci0, "CONDUCTOR");
+      else
+        SCI_WRITE(&sci0, "MUSICIAN");
       SCI_WRITE(&sci0, "\n");
       return;
     }
@@ -1157,9 +1210,6 @@ void startApp(App *self, int arg)
   print_helper(self);
 
   ASYNC(&tone_task, tone_generator, 1);
-
-  // start network discovery
-  do_discovery(self);
 }
 
 int main()

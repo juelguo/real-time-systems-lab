@@ -5,7 +5,9 @@
 #include "stm32f4xx.h"
 #include "stm32f4xx_usart.h"
 
-#define SCI_BUFSIZE 1024
+// Serial writes are synchronized against the IRQ handler, so large bursts
+// (such as the startup helper menu) must fit in the ring buffer.
+#define SCI_BUFSIZE 4096
 
 typedef struct {
   Object super;
