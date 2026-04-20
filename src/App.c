@@ -63,6 +63,7 @@ extern Serial sci0;
 
 static int output_muted = 0;
 static int volume_before_output_mute = DEFAULT_VOLUME;
+static int can_print_enabled = 0;
 static unsigned int rand_state = 12345u;
 
 // internal helper function
@@ -91,6 +92,7 @@ static void reset_program_state(void)
 
   output_muted = 0;
   volume_before_output_mute = DEFAULT_VOLUME;
+  can_print_enabled = 0;
   rand_state = 12345u;
 }
 
@@ -175,7 +177,7 @@ static int can_send_raw(int msgId, int nodeId, uchar *data, int len)
   for (int i = 0; i < len; i++) msg.buff[i] = data[i];
 
   int status = CAN_SEND(&can0, &msg);
-  if (status == 0)
+  if (can_print_enabled && status == 0)
     print_can_msg_with_prefix("Sent", &msg);
   return status;
 }
@@ -203,18 +205,19 @@ static void send_conductor_announce(App *self)
 
 static void send_token(App *self, int next_note_index)
 {
+  int token_index = next_note_index & 0xFF;
+
   if (self->active_count == 1 && self->rank == 0)
   {
-    self->last_token_index = next_note_index;
+    self->last_token_index = token_index;
     self->last_token_node = self->node_id;
-    play_one_note(self, next_note_index);
+    play_one_note(self, token_index);
     return;
   }
 
-  uchar d[2];
-  d[0] = (uchar)((next_note_index >> 8) & 0xFF);
-  d[1] = (uchar)(next_note_index & 0xFF);
-  can_send_raw(CAN_MSG_TOKEN, self->node_id, d, 2);
+  uchar d[1];
+  d[0] = (uchar)token_index;
+  can_send_raw(CAN_MSG_TOKEN, self->node_id, d, 1);
 }
 
 static void send_heartbeat_now(App *self)
@@ -225,7 +228,24 @@ static void send_heartbeat_now(App *self)
 
 static void send_conductor_cmd(App *self, int sub, int val)
 {
-  uchar d[2]; d[0] = (uchar)sub; d[1] = (uchar)val;
+  uchar d[3];
+  d[0] = (uchar)sub;
+
+  if (sub == CAN_SUB_TEMPO)
+  {
+    d[1] = (uchar)((val >> 8) & 0xFF);
+    d[2] = (uchar)(val & 0xFF);
+    can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 3);
+    return;
+  }
+
+  if (sub == CAN_SUB_START || sub == CAN_SUB_STOP)
+  {
+    can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 1);
+    return;
+  }
+
+  d[1] = (uchar)val;
   can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 2);
 }
 
@@ -493,7 +513,7 @@ void finish_note(App *self, int session)
   int next = (self->current_index + 1) & 31;
   int next_abs = (self->last_token_index - (self->last_token_index & 31) + next);
   // actually track absolute note count
-  next_abs = self->last_token_index + 1;
+  next_abs = (self->last_token_index + 1) & 0xFF;
   self->last_token_index = next_abs;
 
   // send next token to all
@@ -523,7 +543,7 @@ void watchdog_fire(App *self, int session)
 {
   if (session != self->watchdog_session) return;
   // the note-player missed its slot — skip it and send next token
-  int next = self->last_token_index + 1;
+  int next = (self->last_token_index + 1) & 0xFF;
   self->last_token_index = next;
   if (self->role == CONDUCTOR_ROLE)
     send_token(self, next);
@@ -675,9 +695,8 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
   if (!was_active)
     add_active_node(self, sender);
 
-  // PING doubles as heartbeat. Only reply during discovery of a new node;
-  // active nodes are already known and do not need another REPLY.
-  if (!self->is_silent && !was_active)
+  // Always answer discovery while not silent so a fresh conductor scan keeps us active.
+  if (!self->is_silent)
     send_discovery_reply(self, sender);
 }
 
@@ -713,8 +732,8 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
 
 static void handle_token(App *self, CANMsg *msg)
 {
-  if (msg->length < 2) return;
-  int idx = ((int)msg->buff[0] << 8) | (int)msg->buff[1];
+  if (msg->length < 1) return;
+  int idx = (int)msg->buff[0];
   self->last_token_index = idx;
   // reset our watchdog
   reset_watchdog(self);
@@ -727,7 +746,6 @@ static void handle_token(App *self, CANMsg *msg)
 
 static void handle_heartbeat(App *self, CANMsg *msg)
 {
-  // if (msg->length < 1) return;
   int sender = msg->nodeId;
   if (sender == self->conductor_id)
     reset_conductor_wd(self);
@@ -744,7 +762,8 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
   {
     self->play_session++;
     self->status = 1;
-    send_token(self, 0);
+    if (self->role == CONDUCTOR_ROLE)
+      send_token(self, 0);
   }
   else if (sub == CAN_SUB_STOP)
   {
@@ -758,7 +777,8 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
   }
   else if (sub == CAN_SUB_TEMPO)
   {
-    apply_tempo(self, val);
+    if (msg->length < 3) return;
+    apply_tempo(self, ((int)msg->buff[1] << 8) | (int)msg->buff[2]);
   }
 }
 
@@ -768,7 +788,8 @@ void receiver(App *self, int unused)
   CANMsg msg;
   if (CAN_RECEIVE(&can0, &msg) != 0)
     return;
-  print_can_msg(&msg);
+  if (can_print_enabled)
+    print_can_msg(&msg);
   if (msg.msgId == CAN_MSG_DISCOVERY_PING)
   {
 
@@ -839,6 +860,7 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  I                     Show local node/rank/role info\n");
   SCI_WRITE(&sci0, "  T                     Toggle local audio mute (musician)\n");
   SCI_WRITE(&sci0, "  P                     Toggle periodic tempo/MUTED printing\n");
+  SCI_WRITE(&sci0, "  L | canlog            Toggle CAN RX/TX message printing\n");
   SCI_WRITE(&sci0, "  f1                    Toggle F1 silent failure\n");
   SCI_WRITE(&sci0, "  f2                    Enter F2 (auto-recover 5-10s)\n");
   SCI_WRITE(&sci0, "  f3                    Enter F3 (simulate CAN disconnect)\n");
@@ -873,11 +895,7 @@ void parameter_control_handler(App *self, char controL_character)
     if (self->mode == VOLUME_MODE)
     {
       int current_val = clamp(value, MIN_VOLUME, MAX_VOLUME);
-      if (self->role == CONDUCTOR_ROLE)
-      {
-        current_val = apply_volume(current_val);
-      }
-      send_conductor_cmd(self, CAN_SUB_TEMPO, current_val);
+      current_val = apply_volume(current_val);
       int_to_string(current_val, out_buf);
       SCI_WRITE(&sci0, "\nVolume set to: ");
     }
@@ -932,6 +950,17 @@ void command_handler(App *self, char c)
     {
       self->buffer_pos = 0;
       print_helper(self);
+      return;
+    }
+
+    if (strcmp(self->buffer, "L") == 0 || strcmp(self->buffer, "canlog") == 0)
+    {
+      self->buffer_pos = 0;
+      can_print_enabled = !can_print_enabled;
+      if (can_print_enabled)
+        SCI_WRITE(&sci0, "\nCAN RX/TX message printing enabled.\n");
+      else
+        SCI_WRITE(&sci0, "\nCAN RX/TX message printing disabled.\n");
       return;
     }
 
