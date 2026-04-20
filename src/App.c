@@ -33,7 +33,7 @@ const int beat_lengths[32] = {
 
 const int MIN_SHIFT = -10;
 
-#define DAC_PORT (*(char *)0x4000741C)
+#define DAC_PORT (*(volatile unsigned char *)0x4000741C)
 #define MIN_VOLUME 0
 #define MAX_VOLUME 20
 #define MIN_TEMPO 60
@@ -78,12 +78,20 @@ static void print_dec_hex_field(char *label, unsigned int value, int hex_digits)
 static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
 static void cancel_pending_msg(Msg *slot);
+static void tone_schedule_next(ToneTask *self, int state);
 
 static void cancel_pending_msg(Msg *slot)
 {
   if (*slot == NULL) return;
   ABORT(*slot);
   *slot = NULL;
+}
+
+static void tone_schedule_next(ToneTask *self, int state)
+{
+  int period = self->period;
+  if (period < 100) period = 100;
+  self->tone_msg = SEND(CURRENT_OFFSET() + USEC(period), USEC(100), self, tone_generator, state);
 }
 
 #if ENABLE_PROBLEM_3
@@ -236,7 +244,7 @@ static void send_token(App *self, int next_note_index)
 {
   if (self->is_silent) return;
 
-  int token_index = next_note_index & 0xFF;
+  int token_index = next_note_index & 0xFFFF;
 
   if (self->active_count == 1 && self->rank == 0)
   {
@@ -246,9 +254,10 @@ static void send_token(App *self, int next_note_index)
     return;
   }
 
-  uchar d[1];
-  d[0] = (uchar)token_index;
-  can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 1);
+  uchar d[2];
+  d[0] = (uchar)(token_index & 0xFF);
+  d[1] = (uchar)((token_index >> 8) & 0xFF);
+  can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, token_index > 0xFF ? 2 : 1);
 }
 
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
@@ -423,19 +432,31 @@ void int_to_string(int n, char *buffer)
 }
 
 // method for tone generator
-void tone_set_mute(ToneTask *self, int value)
+int tone_set_mute(ToneTask *self, int value)
 {
-  self->mute = value;
+  self->mute = (value != 0);
+  if (self->mute)
+  {
+    cancel_pending_msg(&self->tone_msg);
+    DAC_PORT = 0;
+    return 0;
+  }
+
+  if (self->tone_msg == NULL)
+    self->tone_msg = SEND(CURRENT_OFFSET(), USEC(100), self, tone_generator, 1);
+  return 0;
 }
 
-void tone_set_volume(ToneTask *self, int value)
+int tone_set_volume(ToneTask *self, int value)
 {
   self->val = value;
+  return self->val;
 }
 
-void tone_set_period(ToneTask *self, int value)
+int tone_set_period(ToneTask *self, int value)
 {
   self->period = value;
+  return self->period;
 }
 
 int tone_get_volume(ToneTask *self, int unused)
@@ -444,18 +465,23 @@ int tone_get_volume(ToneTask *self, int unused)
   return self->val;
 }
 
-void tone_generator(ToneTask *self, int state, int period)
+int tone_get_mute(ToneTask *self, int unused)
 {
+  (void)unused;
+  return self->mute;
+}
+
+int tone_generator(ToneTask *self, int state)
+{
+  self->tone_msg = NULL;
+
   if (self->mute == 1)
   {
     DAC_PORT = 0;
-    SEND(USEC(self->period), USEC(100), self, tone_generator, state);
-    return;
+    return 0;
   }
 
-  int next_state = state ? 0 : 1;
-
-  if (next_state == 1)
+  if (state == 1)
   {
     DAC_PORT = tone_get_volume(self, 0);
   }
@@ -464,7 +490,8 @@ void tone_generator(ToneTask *self, int state, int period)
     DAC_PORT = 0;
   }
 
-  SEND(USEC(self->period), USEC(100), self, tone_generator, next_state);
+  tone_schedule_next(self, state ? 0 : 1);
+  return 0;
 }
 
 // get the shifted value with input key
@@ -532,7 +559,9 @@ void apply_output_unmute(void)
 void apply_play(App *self)
 {
   self->play_session++;
+  self->song_active = 1;
   self->status = 1;
+  SYNC(&tone_task, tone_set_mute, 1);
   send_conductor_cmd(self, CAN_SUB_START, 0);
   send_token(self, 0);
 }
@@ -540,6 +569,7 @@ void apply_play(App *self)
 void apply_stop(App *self)
 {
   self->play_session++;
+  self->song_active = 0;
   self->mute = 1;
   self->status = 0;
   SYNC(&tone_task, tone_set_mute, 1);
@@ -554,6 +584,7 @@ void play_one_note(App *self, int note_index)
   if ((note_index % self->active_count) != self->rank) return;
 
   int session = ++self->play_session;
+  self->song_active = 1;
   self->current_index = note_index & 31;
   self->status = 1;
 
@@ -583,7 +614,12 @@ void play_one_note(App *self, int note_index)
 
 void finish_note(App *self, int session)
 {
-  if (session != self->play_session) return;
+  if (session != self->play_session)
+  {
+    if (can_print_enabled)
+      SCI_WRITE(&sci0, "\nIgnored stale finish_note.\n");
+    return;
+  }
 
 #if ENABLE_PROBLEM_3
   // stop heartbeat
@@ -592,11 +628,9 @@ void finish_note(App *self, int session)
 
   SYNC(&tone_task, tone_set_mute, 1);
   self->status = 0;
+  if (!self->song_active) return;
 
-  int next = (self->current_index + 1) & 31;
-  int next_abs = (self->last_token_index - (self->last_token_index & 31) + next);
-  // actually track absolute note count
-  next_abs = (self->last_token_index + 1) & 0xFF;
+  int next_abs = self->last_token_index + 1;
   self->last_token_index = next_abs;
 
   // send next token to all
@@ -720,6 +754,7 @@ static void enter_silent_failure(App *self, int mode)
   cancel_pending_msg(&self->watchdog_msg);
   cancel_pending_msg(&self->cond_wd_msg);
   self->play_session++;
+  self->song_active = 0;
   self->status = 0;
   SYNC(&tone_task, tone_set_mute, 1);
   if (self->was_conductor)
@@ -888,6 +923,18 @@ static void handle_token(App *self, CANMsg *msg)
 {
   if (msg->length < 1) return;
   int idx = (int)msg->buff[0];
+  if (msg->length >= 2)
+    idx |= ((int)msg->buff[1] << 8);
+  if (!self->song_active)
+  {
+    if (idx != 0)
+    {
+      if (can_print_enabled)
+        SCI_WRITE(&sci0, "\nIgnored TOKEN while stopped.\n");
+      return;
+    }
+    self->song_active = 1;
+  }
   self->last_token_index = idx;
 #if ENABLE_PROBLEM_3
   // reset our watchdog
@@ -927,14 +974,24 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
   int val = (msg->length > 1) ? (int)msg->buff[1] : 0;
   if (sub == CAN_SUB_START)
   {
+    if (self->song_active)
+    {
+      if (can_print_enabled)
+        SCI_WRITE(&sci0, "\nIgnored START while already playing.\n");
+      return;
+    }
+
     self->play_session++;
+    self->song_active = 1;
     self->status = 1;
+    SYNC(&tone_task, tone_set_mute, 1);
     if (self->role == CONDUCTOR_ROLE)
       send_token(self, 0);
   }
   else if (sub == CAN_SUB_STOP)
   {
     self->play_session++;
+    self->song_active = 0;
     self->status = 0;
     SYNC(&tone_task, tone_set_mute, 1);
   }
@@ -1236,7 +1293,7 @@ void command_handler(App *self, char c)
     {
       // show local info
       self->buffer_pos = 0;
-      char tmp[8];
+      char tmp[12];
       SCI_WRITE(&sci0, "\nNode: ");
       int_to_string(self->node_id, tmp);
       SCI_WRITE(&sci0, tmp);
@@ -1248,6 +1305,24 @@ void command_handler(App *self, char c)
         SCI_WRITE(&sci0, "CONDUCTOR");
       else
         SCI_WRITE(&sci0, "MUSICIAN");
+      SCI_WRITE(&sci0, "  Active: ");
+      int_to_string(self->active_count, tmp);
+      SCI_WRITE(&sci0, tmp);
+      SCI_WRITE(&sci0, "  Song: ");
+      if (self->song_active)
+        SCI_WRITE(&sci0, "ON");
+      else
+        SCI_WRITE(&sci0, "OFF");
+      SCI_WRITE(&sci0, "\nLast token: ");
+      int_to_string(self->last_token_index, tmp);
+      SCI_WRITE(&sci0, tmp);
+      SCI_WRITE(&sci0, "  Audio: ");
+      if (output_muted)
+        SCI_WRITE(&sci0, "volume-muted");
+      else if (SYNC(&tone_task, tone_get_mute, 0))
+        SCI_WRITE(&sci0, "note-muted");
+      else
+        SCI_WRITE(&sci0, "on");
       SCI_WRITE(&sci0, "\n");
       return;
     }
@@ -1469,7 +1544,7 @@ void startApp(App *self, int arg)
   if (self->print_enabled)
     SEND(MSEC(PRINT_INTERVAL_S * 1000), MSEC(100), self, periodic_print, self->print_session);
 
-  ASYNC(&tone_task, tone_generator, 1);
+  // The oscillator is started by tone_set_mute(0) when a note begins.
 }
 
 int main()

@@ -45,6 +45,7 @@ typedef struct
   int mute;          // indicate mute or not
   int status;        // indicate if the tone generator is already running
   int play_session;  // monotonic playback session id
+  int song_active;   // global melody state, independent from local note output
   int node_id;       // network node id
   int rank;          // node rank in active_nodes
   int conductor_id;  // current conductor
@@ -72,7 +73,7 @@ typedef struct
   int print_enabled;  // enable/disable periodic tempo/MUTED printing
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, 0, 0, 0, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, 0, 0, 0, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 
 void reader(App *, int);
 void receiver(App *, int);
@@ -94,16 +95,19 @@ typedef struct
   int val;    // value for the volume
   int mute;   // mute or not
   int period; // period
+  Msg tone_msg;
 } ToneTask;
 
-#define initToneTask() {initObject(), 8, 0, 0};
+#define initToneTask() {initObject(), 8, 1, 1136, NULL};
 
 // set method
-void tone_set_mute(ToneTask *, int);
-void tone_set_period(ToneTask *, int);
-void tone_set_volume(ToneTask *, int);
+int tone_set_mute(ToneTask *, int);
+int tone_set_period(ToneTask *, int);
+int tone_set_volume(ToneTask *, int);
 
 // get method
 int tone_get_volume(ToneTask *, int);
+int tone_get_mute(ToneTask *, int);
+int tone_generator(ToneTask *, int);
 
 #endif
