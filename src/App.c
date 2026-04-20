@@ -56,6 +56,10 @@ const int MIN_SHIFT = -10;
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
 
+// Problem 3/4 reliability layers are disabled for the current demo.
+#define ENABLE_PROBLEM_3 0
+#define ENABLE_PROBLEM_4 0
+
 extern App app;
 extern ToneTask tone_task;
 extern Can can0;
@@ -75,18 +79,20 @@ static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
 static void cancel_pending_msg(Msg *slot);
 
-static unsigned int simple_rand(void)
-{
-  rand_state = rand_state * 1664525u + 1013904223u;
-  return rand_state;
-}
-
 static void cancel_pending_msg(Msg *slot)
 {
   if (*slot == NULL) return;
   ABORT(*slot);
   *slot = NULL;
 }
+
+#if ENABLE_PROBLEM_3
+static unsigned int simple_rand(void)
+{
+  rand_state = rand_state * 1664525u + 1013904223u;
+  return rand_state;
+}
+#endif
 
 // Resets the program state to its initial values
 static void reset_program_state(void)
@@ -107,15 +113,17 @@ static void reset_program_state(void)
   rand_state = 12345u;
 }
 
-static int rand_range(int lo, int hi)
-{
-  return lo + (int)(simple_rand() % (unsigned int)(hi - lo + 1));
-}
-
 static int is_valid_node_id(int node_id)
 {
   return node_id >= 0 && node_id <= 14;
 }
+
+#if ENABLE_PROBLEM_3
+static int rand_range(int lo, int hi)
+{
+  return lo + (int)(simple_rand() % (unsigned int)(hi - lo + 1));
+}
+#endif
 
 static void arr_insert_sorted(int *arr, int *count, int val)
 {
@@ -128,6 +136,14 @@ static void arr_insert_sorted(int *arr, int *count, int val)
   (*count)++;
 }
 
+static int arr_contains(int *arr, int count, int val)
+{
+  for (int i = 0; i < count; i++)
+    if (arr[i] == val) return 1;
+  return 0;
+}
+
+#if ENABLE_PROBLEM_4
 static void arr_remove(int *arr, int *count, int val)
 {
   for (int i = 0; i < *count; i++)
@@ -140,13 +156,7 @@ static void arr_remove(int *arr, int *count, int val)
     }
   }
 }
-
-static int arr_contains(int *arr, int count, int val)
-{
-  for (int i = 0; i < count; i++)
-    if (arr[i] == val) return 1;
-  return 0;
-}
+#endif
 
 static int arr_rank_of(int *arr, int count, int val)
 {
@@ -162,15 +172,16 @@ static void add_active_node(App *self, int nid)
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
 }
 
+static void add_known_node(App *self, int nid)
+{
+  arr_insert_sorted(self->known_nodes, &self->known_count, nid);
+}
+
+#if ENABLE_PROBLEM_4
 static void remove_active_node(App *self, int nid)
 {
   arr_remove(self->active_nodes, &self->active_count, nid);
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
-}
-
-static void add_known_node(App *self, int nid)
-{
-  arr_insert_sorted(self->known_nodes, &self->known_count, nid);
 }
 
 static int lowest_active_nodeId(App *self)
@@ -178,9 +189,13 @@ static int lowest_active_nodeId(App *self)
   if (self->active_count == 0) return self->node_id;
   return self->active_nodes[0];
 }
+#endif
 
-static int can_send_raw(int msgId, int nodeId, uchar *data, int len)
+static int can_send_raw(App *self, int msgId, int nodeId, uchar *data, int len)
 {
+  if (self != NULL && self->is_silent) return 1;
+  if (len > 8) len = 8;
+
   CANMsg msg;
   msg.msgId = msgId;
   msg.nodeId = (uchar)nodeId;
@@ -195,27 +210,32 @@ static int can_send_raw(int msgId, int nodeId, uchar *data, int len)
 
 static void send_discovery_ping(App *self)
 {
-  can_send_raw(CAN_MSG_DISCOVERY_PING, self->node_id, 0, 0);
+  can_send_raw(self, CAN_MSG_DISCOVERY_PING, self->node_id, 0, 0);
 }
 
 static void send_discovery_reply(App *self, int to_node)
 {
   (void)to_node;
   uchar d[1]; d[0] = (uchar)self->node_id;
-  can_send_raw(CAN_MSG_DISCOVERY_REPLY, self->node_id, d, 1);
+  can_send_raw(self, CAN_MSG_DISCOVERY_REPLY, self->node_id, d, 1);
 }
 
 static void send_conductor_announce(App *self)
 {
-  uchar d[17];
+  uchar d[8];
+  int count = self->active_count;
+  if (count > 7) count = 7;
+
   d[0] = (uchar)self->node_id;
-  for (int i = 0; i < self->active_count && i < 16; i++)
+  for (int i = 0; i < count; i++)
     d[1+i] = (uchar)self->active_nodes[i];
-  can_send_raw(CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1 + self->active_count);
+  can_send_raw(self, CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1 + count);
 }
 
 static void send_token(App *self, int next_note_index)
 {
+  if (self->is_silent) return;
+
   int token_index = next_note_index & 0xFF;
 
   if (self->active_count == 1 && self->rank == 0)
@@ -228,17 +248,21 @@ static void send_token(App *self, int next_note_index)
 
   uchar d[1];
   d[0] = (uchar)token_index;
-  can_send_raw(CAN_MSG_TOKEN, self->node_id, d, 1);
+  can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 1);
 }
 
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
 static void send_heartbeat_now(App *self)
 {
   uchar d[1]; d[0] = (uchar)self->node_id;
-  can_send_raw(CAN_MSG_HEARTBEAT, self->node_id, d, 1);
+  can_send_raw(self, CAN_MSG_HEARTBEAT, self->node_id, d, 1);
 }
+#endif
 
 static void send_conductor_cmd(App *self, int sub, int val)
 {
+  if (self->is_silent) return;
+
   uchar d[3];
   d[0] = (uchar)sub;
 
@@ -246,18 +270,18 @@ static void send_conductor_cmd(App *self, int sub, int val)
   {
     d[1] = (uchar)((val >> 8) & 0xFF);
     d[2] = (uchar)(val & 0xFF);
-    can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 3);
+    can_send_raw(self, CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 3);
     return;
   }
 
   if (sub == CAN_SUB_START || sub == CAN_SUB_STOP)
   {
-    can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 1);
+    can_send_raw(self, CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 1);
     return;
   }
 
   d[1] = (uchar)val;
-  can_send_raw(CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 2);
+  can_send_raw(self, CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 2);
 }
 
 static char *can_msg_name(int msgId)
@@ -347,8 +371,12 @@ static void print_can_msg(CANMsg *msg)
 // forward declarations
 static void become_conductor(App *self, int reason);
 static void become_musician(App *self, int reason);
+#if ENABLE_PROBLEM_3
 static void reset_watchdog(App *self);
+#endif
+#if ENABLE_PROBLEM_4
 static void reset_conductor_wd(App *self);
+#endif
 
 int clamp(int value, int min, int max)
 {
@@ -534,12 +562,21 @@ void play_one_note(App *self, int note_index)
   int active_time = length - 50;
   if (active_time < 10) active_time = 10;
 
+  // conductor is legitimately idle while we play; extend its watchdog to cover our note
+  {
+    int session_cwd = ++self->cond_wd_session;
+    cancel_pending_msg(&self->cond_wd_msg);
+    self->cond_wd_msg = SEND(MSEC(length + 500), MSEC(20), self, conductor_wd_fire, session_cwd);
+  }
+
   SYNC(&tone_task, tone_set_period, period);
   SYNC(&tone_task, tone_set_mute, 0);
 
+#if ENABLE_PROBLEM_3
   // start heartbeat loop while playing
   self->note_hb_session++;
   SEND(MSEC(100), MSEC(2), self, send_note_hb, self->note_hb_session);
+#endif
 
   SEND(MSEC(active_time), MSEC(2), self, finish_note, session);
 }
@@ -548,8 +585,10 @@ void finish_note(App *self, int session)
 {
   if (session != self->play_session) return;
 
+#if ENABLE_PROBLEM_3
   // stop heartbeat
   self->note_hb_session++;
+#endif
 
   SYNC(&tone_task, tone_set_mute, 1);
   self->status = 0;
@@ -566,25 +605,36 @@ void finish_note(App *self, int session)
 
 void send_note_hb(App *self, int session)
 {
+#if ENABLE_PROBLEM_3
   if (session != self->note_hb_session) return;
   if (self->is_silent) return;
   if (self->active_count > 1)
     send_heartbeat_now(self);
   SEND(MSEC(100), MSEC(2), self, send_note_hb, session);
+#else
+  (void)self;
+  (void)session;
+#endif
 }
 
 void send_cond_hb(App *self, int session)
 {
+#if ENABLE_PROBLEM_4
   if (session != self->cond_hb_session) return;
   if (self->is_silent) return;
   if (self->role != CONDUCTOR_ROLE) return;
   if (self->active_count > 1)
     send_heartbeat_now(self);
   SEND(MSEC(100), MSEC(5), self, send_cond_hb, session);
+#else
+  (void)self;
+  (void)session;
+#endif
 }
 
 void watchdog_fire(App *self, int session)
 {
+#if ENABLE_PROBLEM_3
   if (session != self->watchdog_session) return;
   self->watchdog_msg = NULL;
   // the note-player missed its slot — skip it and send next token
@@ -592,18 +642,28 @@ void watchdog_fire(App *self, int session)
   self->last_token_index = next;
   if (self->role == CONDUCTOR_ROLE)
     send_token(self, next);
+#else
+  (void)self;
+  (void)session;
+#endif
 }
 
 void conductor_wd_fire(App *self, int session)
 {
+#if ENABLE_PROBLEM_4
   if (session != self->cond_wd_session) return;
   self->cond_wd_msg = NULL;
   // conductor gone — elect lowest active rank
   remove_active_node(self, self->conductor_id);
   if (lowest_active_nodeId(self) == self->node_id)
     become_conductor(self, COND_REASON_AUTO);
+#else
+  (void)self;
+  (void)session;
+#endif
 }
 
+#if ENABLE_PROBLEM_3
 static void reset_watchdog(App *self)
 {
   int session = ++self->watchdog_session;
@@ -611,13 +671,16 @@ static void reset_watchdog(App *self)
   cancel_pending_msg(&self->watchdog_msg);
   self->watchdog_msg = SEND(MSEC(delay), MSEC(10), self, watchdog_fire, session);
 }
+#endif
 
+#if ENABLE_PROBLEM_4
 static void reset_conductor_wd(App *self)
 {
   int session = ++self->cond_wd_session;
   cancel_pending_msg(&self->cond_wd_msg);
   self->cond_wd_msg = SEND(MSEC(500), MSEC(20), self, conductor_wd_fire, session);
 }
+#endif
 
 static void do_discovery(App *self)
 {
@@ -644,6 +707,7 @@ void discovery_timeout(App *self, int session)
 
 static void enter_silent_failure(App *self, int mode)
 {
+#if ENABLE_PROBLEM_3
   if (self->is_silent) return;
   self->is_silent = 1;
   self->silent_mode = mode;
@@ -668,10 +732,16 @@ static void enter_silent_failure(App *self, int mode)
     self->silent_session++;
     SEND(MSEC(delay), MSEC(100), self, f2_auto_exit, self->silent_session);
   }
+#else
+  (void)self;
+  (void)mode;
+  SCI_WRITE(&sci0, "\nProblem 3 silent failure mode is disabled.\n");
+#endif
 }
 
 static void leave_silent_failure(App *self)
 {
+#if ENABLE_PROBLEM_3
   if (!self->is_silent) return;
   self->is_silent = 0;
   self->silent_session++;
@@ -687,22 +757,33 @@ static void leave_silent_failure(App *self)
   // the node becomes conductor after the 500ms window (handled below)
   self->active_count = 0;
   do_discovery(self);
+#else
+  (void)self;
+  SCI_WRITE(&sci0, "\nProblem 3 silent failure mode is disabled.\n");
+#endif
 }
 
 
 void f2_auto_exit(App *self, int session)
 {
+#if ENABLE_PROBLEM_3
   if (session != self->silent_session) return;
   leave_silent_failure(self);
+#else
+  (void)self;
+  (void)session;
+#endif
 }
 
 static void become_conductor(App *self, int reason)
 {
   self->role = CONDUCTOR_ROLE;
   self->conductor_id = self->node_id;
+#if ENABLE_PROBLEM_4
   // start idle conductor heartbeat
   self->cond_hb_session++;
   SEND(MSEC(100), MSEC(5), self, send_cond_hb, self->cond_hb_session);
+#endif
   // cancel musician watchdog
   self->watchdog_session++;
   self->cond_wd_session++;
@@ -747,9 +828,13 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
   if (!was_active)
     add_active_node(self, sender);
 
+#if ENABLE_PROBLEM_3
   // Always answer discovery while not silent so a fresh conductor scan keeps us active.
   if (!self->is_silent)
     send_discovery_reply(self, sender);
+#else
+  send_discovery_reply(self, sender);
+#endif
 }
 
 static void handle_discovery_reply(App *self, CANMsg *msg)
@@ -766,16 +851,33 @@ static void handle_discovery_reply(App *self, CANMsg *msg)
 
 static void handle_conductor_announce(App *self, CANMsg *msg)
 {
-  // if (msg->length < 1) return;
   int new_cond = msg->nodeId;
-  // rebuild active list from announce
-  self->active_count = 0;
+
+  if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
+    new_cond = msg->buff[0];
+
+  add_known_node(self, new_cond);
+
+  // An announce proves the conductor is alive, but it is not a fresh
+  // discovery result. Preserve our local active list and only merge IDs.
+  add_active_node(self, new_cond);
   for (int i = 0; i < msg->length; i++)
-    arr_insert_sorted(self->active_nodes, &self->active_count, msg->buff[i]);
+  {
+    if (is_valid_node_id((int)msg->buff[i]))
+    {
+      add_active_node(self, msg->buff[i]);
+      add_known_node(self, msg->buff[i]);
+    }
+  }
+#if ENABLE_PROBLEM_3
   if (!self->is_silent)
     add_active_node(self, self->node_id);
+#else
+  add_active_node(self, self->node_id);
+#endif
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
   self->conductor_id = new_cond;
+  self->discovery_done = 1;
   if (new_cond == self->node_id)
     become_conductor(self, COND_REASON_MANUAL);
   else
@@ -787,23 +889,33 @@ static void handle_token(App *self, CANMsg *msg)
   if (msg->length < 1) return;
   int idx = (int)msg->buff[0];
   self->last_token_index = idx;
+#if ENABLE_PROBLEM_3
   // reset our watchdog
   reset_watchdog(self);
+#endif
+#if ENABLE_PROBLEM_4
   // reset conductor watchdog
   reset_conductor_wd(self);
+#endif
   // play if it's our turn
   if (!self->is_silent && self->active_count > 0 && (idx % self->active_count) == self->rank)
     play_one_note(self, idx);
 }
 
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
 static void handle_heartbeat(App *self, CANMsg *msg)
 {
   int sender = msg->nodeId;
+#if ENABLE_PROBLEM_4
   if (sender == self->conductor_id)
     reset_conductor_wd(self);
-  else
+#endif
+#if ENABLE_PROBLEM_3
+  if (sender != self->conductor_id)
     reset_watchdog(self);
+#endif
 }
+#endif
 
 static void handle_conductor_cmd(App *self, CANMsg *msg)
 {
@@ -856,8 +968,10 @@ void receiver(App *self, int unused)
     handle_conductor_announce(self, &msg);
   else if (msg.msgId == CAN_MSG_TOKEN)
     handle_token(self, &msg);
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
   else if (msg.msgId == CAN_MSG_HEARTBEAT)
     handle_heartbeat(self, &msg);
+#endif
   else if (msg.msgId == CAN_MSG_CONDUCTOR_CMD)
     handle_conductor_cmd(self, &msg);
 }
@@ -894,7 +1008,11 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  node <id> 0-14, claim, R reset key+tempo\n");
   SCI_WRITE(&sci0, "  m/member, I info, T audio mute\n");
   SCI_WRITE(&sci0, "  P periodic print, L/canlog\n");
+#if ENABLE_PROBLEM_3
   SCI_WRITE(&sci0, "  f1 silent, f2 recover 5-10s, f3 CAN off, z leave silent\n");
+#else
+  SCI_WRITE(&sci0, "  Problem 3/4 silent-failure recovery disabled\n");
+#endif
   SCI_WRITE(&sci0, "Settings input: number+Enter, e cancel.\n");
   SCI_WRITE(&sci0, "Choice: ");
 }
