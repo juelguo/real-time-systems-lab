@@ -864,19 +864,19 @@ void print_helper(App *self)
 {
   char tmp[12];
 
-  SCI_WRITE(&sci0, "\n=== Brother John Music Player ===\n");
+  SCI_WRITE(&sci0, "\n=== Brother John ===\n");
   if (self->role == CONDUCTOR_ROLE)
   {
-    SCI_WRITE(&sci0, "Board role: CONDUCTOR (keyboard controls local + CAN broadcast)\n");
+    SCI_WRITE(&sci0, "Role: CONDUCTOR (local + CAN)\n");
   }
   else
   {
-    SCI_WRITE(&sci0, "Board role: MUSICIAN (controlled by incoming CAN commands)\n");
+    SCI_WRITE(&sci0, "Role: MUSICIAN (CAN controlled)\n");
   }
-  SCI_WRITE(&sci0, "Node id: ");
+  SCI_WRITE(&sci0, "Node: ");
   if (self->node_id < 0)
   {
-    SCI_WRITE(&sci0, "UNSET (use 'node <id>' to start discovery)\n");
+    SCI_WRITE(&sci0, "UNSET (node <id> starts discovery)\n");
   }
   else
   {
@@ -884,45 +884,16 @@ void print_helper(App *self)
     SCI_WRITE(&sci0, tmp);
     SCI_WRITE(&sci0, "\n");
   }
-  SCI_WRITE(&sci0, "Enter a command and press Enter.\n");
-
-  SCI_WRITE(&sci0, "\nRole Commands:\n");
-  SCI_WRITE(&sci0, "  c | conductor         Switch to conductor mode\n");
-  SCI_WRITE(&sci0, "  u | musician          Switch to musician mode\n");
-
-  SCI_WRITE(&sci0, "\nPlayback Commands:\n");
-  SCI_WRITE(&sci0, "  p | play              Play the melody\n");
-  SCI_WRITE(&sci0, "  q | stop              Stop the melody\n");
-
-  SCI_WRITE(&sci0, "\nSettings Commands:\n");
-  SCI_WRITE(&sci0, "  t | tempo             Set tempo (60-240 BPM)\n");
-  SCI_WRITE(&sci0, "  k | key               Set key offset (-5 to +5)\n");
-  SCI_WRITE(&sci0, "  v | volume            Set volume (0-20)\n");
-
-  SCI_WRITE(&sci0, "\nHardware Commands:\n");
-  SCI_WRITE(&sci0, "  s | mute              Mute tone output\n");
-  SCI_WRITE(&sci0, "  r | unmute            Resume tone output\n");
-  SCI_WRITE(&sci0, "  h | help              Show this menu\n");
-
-  SCI_WRITE(&sci0, "\nNetwork Commands:\n");
-  SCI_WRITE(&sci0, "  node <id>             Set this board's node id and start discovery\n");
-  SCI_WRITE(&sci0, "  claim                 Claim conductor role (P2)\n");
-  SCI_WRITE(&sci0, "  R                     Reset key and tempo to defaults\n");
-  SCI_WRITE(&sci0, "  m | member            Show all boards membership status\n");
-  SCI_WRITE(&sci0, "  I                     Show local node/rank/role info\n");
-  SCI_WRITE(&sci0, "  T                     Toggle local audio mute (musician)\n");
-  SCI_WRITE(&sci0, "  P                     Toggle periodic tempo/MUTED printing\n");
-  SCI_WRITE(&sci0, "  L | canlog            Toggle CAN RX/TX message printing\n");
-  SCI_WRITE(&sci0, "  f1                    Toggle F1 silent failure\n");
-  SCI_WRITE(&sci0, "  f2                    Enter F2 (auto-recover 5-10s)\n");
-  SCI_WRITE(&sci0, "  f3                    Enter F3 (simulate CAN disconnect)\n");
-  SCI_WRITE(&sci0, "  z                     Exit silent failure manually\n");
-
-  SCI_WRITE(&sci0, "\nIn Settings Mode (tempo/key/volume):\n");
-  SCI_WRITE(&sci0, "  Type a number and press Enter\n");
-  SCI_WRITE(&sci0, "  e                     Cancel and return to main menu\n");
-
-  SCI_WRITE(&sci0, "\nChoice: ");
+  SCI_WRITE(&sci0, "Commands:\n");
+  SCI_WRITE(&sci0, "  c/conductor, u/musician, h/help\n");
+  SCI_WRITE(&sci0, "  p/play, q/stop, s/mute, r/unmute\n");
+  SCI_WRITE(&sci0, "  t/tempo 60-240, k/key -5..5, v/volume 0-20\n");
+  SCI_WRITE(&sci0, "  node <id> 0-14, claim, R reset key+tempo\n");
+  SCI_WRITE(&sci0, "  m/member, I info, T audio mute\n");
+  SCI_WRITE(&sci0, "  P periodic print, L/canlog\n");
+  SCI_WRITE(&sci0, "  f1 silent, f2 recover 5-10s, f3 CAN off, z leave silent\n");
+  SCI_WRITE(&sci0, "Settings input: number+Enter, e cancel.\n");
+  SCI_WRITE(&sci0, "Choice: ");
 }
 
 // handle "parameter"
