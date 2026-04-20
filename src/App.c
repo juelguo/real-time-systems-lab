@@ -711,7 +711,7 @@ static void become_conductor(App *self, int reason)
 
   if (reason == COND_REASON_MANUAL)
     SCI_WRITE(&sci0, "\nClaimed Conductorship\n");
-  else
+  else if (reason == COND_REASON_AUTO || reason == COND_REASON_DEAD)
     SCI_WRITE(&sci0, "\nI Am The New Conductor\n");
   // start periodic tempo printing if enabled
   if (self->print_enabled)
@@ -808,6 +808,9 @@ static void handle_heartbeat(App *self, CANMsg *msg)
 static void handle_conductor_cmd(App *self, CANMsg *msg)
 {
   if (msg->length < 1) return;
+  if (self->conductor_id < 0 || msg->nodeId != self->conductor_id)
+    return;
+
   int sub = msg->buff[0];
   int val = (msg->length > 1) ? (int)msg->buff[1] : 0;
   if (sub == CAN_SUB_START)
@@ -885,7 +888,7 @@ void print_helper(App *self)
     SCI_WRITE(&sci0, "\n");
   }
   SCI_WRITE(&sci0, "Commands:\n");
-  SCI_WRITE(&sci0, "  c/conductor, u/musician, h/help\n");
+  // SCI_WRITE(&sci0, "  h/help\n");
   SCI_WRITE(&sci0, "  p/play, q/stop, s/mute, r/unmute\n");
   SCI_WRITE(&sci0, "  t/tempo 60-240, k/key -5..5, v/volume 0-20\n");
   SCI_WRITE(&sci0, "  node <id> 0-14, claim, R reset key+tempo\n");
@@ -1028,21 +1031,16 @@ void command_handler(App *self, char c)
 
     if (strcmp(self->buffer, "c") == 0 || strcmp(self->buffer, "conductor") == 0)
     {
-      self->role = CONDUCTOR_ROLE;
-      self->mode = CONTROL_MODE;
       self->buffer_pos = 0;
-      SCI_WRITE(&sci0, "\nSwitched to CONDUCTOR mode.\n");
+      SCI_WRITE(&sci0, "\nDirect conductor command is disabled. Use 'claim'.\n");
       print_helper(self);
       return;
     }
 
     if (strcmp(self->buffer, "u") == 0 || strcmp(self->buffer, "musician") == 0)
     {
-      self->role = MUSICIAN_ROLE;
-      self->mode = CONTROL_MODE;
       self->buffer_pos = 0;
-      apply_stop(self);
-      SCI_WRITE(&sci0, "\nSwitched to MUSICIAN mode.\n");
+      SCI_WRITE(&sci0, "\nDirect musician command is disabled. Conductorship changes are handled by announce messages.\n");
       print_helper(self);
       return;
     }
@@ -1350,6 +1348,8 @@ void startApp(App *self, int arg)
   SYNC(&tone_task, tone_set_mute, 1);
 
   print_helper(self);
+  if (self->print_enabled)
+    SEND(MSEC(PRINT_INTERVAL_S * 1000), MSEC(100), self, periodic_print, self->print_session);
 
   ASYNC(&tone_task, tone_generator, 1);
 }
