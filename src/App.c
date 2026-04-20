@@ -200,8 +200,7 @@ static void send_discovery_ping(App *self)
 
 static void send_discovery_reply(App *self, int to_node)
 {
-  (void)to_node;
-  uchar d[1]; d[0] = (uchar)self->node_id;
+  uchar d[1]; d[0] = (uchar)to_node;
   can_send_raw(CAN_MSG_DISCOVERY_REPLY, self->node_id, d, 1);
 }
 
@@ -754,27 +753,17 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
 
 static void handle_discovery_reply(App *self, CANMsg *msg)
 {
+  // msg->nodeId is the replier; buff[0] is the echo of who sent the ping (us)
   int sender = msg->nodeId;
-
-  // Keep compatibility with older reply frames that encoded the sender only in buff[0].
-  if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
-    sender = msg->buff[0];
-
   add_active_node(self, sender);
   add_known_node(self, sender);
 }
 
 static void handle_conductor_announce(App *self, CANMsg *msg)
 {
-  // if (msg->length < 1) return;
   int new_cond = msg->nodeId;
-  // rebuild active list from announce
-  self->active_count = 0;
-  for (int i = 0; i < msg->length; i++)
-    arr_insert_sorted(self->active_nodes, &self->active_count, msg->buff[i]);
-  if (!self->is_silent)
-    add_active_node(self, self->node_id);
-  self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
+  // new protocol carries no member list — active membership is maintained via discovery
+  add_active_node(self, new_cond);
   self->conductor_id = new_cond;
   if (new_cond == self->node_id)
     become_conductor(self, COND_REASON_MANUAL);
