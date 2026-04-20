@@ -69,6 +69,9 @@ static unsigned int rand_state = 12345u;
 // internal helper function
 void int_to_string(int n, char *buffer);
 static char *can_msg_name(int msgId);
+static void print_hex_fixed(unsigned int value, int digits);
+static void print_dec_hex_field(char *label, unsigned int value, int hex_digits);
+static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
 
 static unsigned int simple_rand(void)
@@ -260,39 +263,72 @@ static char *can_msg_name(int msgId)
   return "UNKNOWN";
 }
 
+static void print_hex_fixed(unsigned int value, int digits)
+{
+  char out[2];
+  out[1] = '\0';
+  SCI_WRITE(&sci0, "0x");
+  for (int shift = (digits - 1) * 4; shift >= 0; shift -= 4)
+  {
+    int nibble = (value >> shift) & 0x0F;
+    out[0] = (char)(nibble < 10 ? ('0' + nibble) : ('A' + nibble - 10));
+    SCI_WRITE(&sci0, out);
+  }
+}
+
+static void print_dec_hex_field(char *label, unsigned int value, int hex_digits)
+{
+  char tmp[12];
+  SCI_WRITE(&sci0, label);
+  int_to_string((int)value, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, " (");
+  print_hex_fixed(value, hex_digits);
+  SCI_WRITE(&sci0, ")");
+}
+
+static void print_can_buffer(CANMsg *msg)
+{
+  char tmp[12];
+  int len = msg->length;
+
+  SCI_WRITE(&sci0, "[");
+  for (int i = 0; i < len && i < 8; i++)
+  {
+    if (i > 0) SCI_WRITE(&sci0, " ");
+    print_hex_fixed(msg->buff[i], 2);
+    SCI_WRITE(&sci0, "(");
+    int_to_string(msg->buff[i], tmp);
+    SCI_WRITE(&sci0, tmp);
+    SCI_WRITE(&sci0, ")");
+  }
+  if (len > 8)
+    SCI_WRITE(&sci0, " ...");
+  SCI_WRITE(&sci0, "]");
+}
+
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg)
 {
   char tmp[12];
+  unsigned int std_id = (((unsigned int)msg->msgId & 0x7F) << 4) |
+                        ((unsigned int)msg->nodeId & 0x0F);
 
   SCI_WRITE(&sci0, "\n");
   SCI_WRITE(&sci0, prefix);
-  SCI_WRITE(&sci0, " CAN: ");
+  SCI_WRITE(&sci0, " CAN ");
   SCI_WRITE(&sci0, can_msg_name(msg->msgId));
-  SCI_WRITE(&sci0, " [msgId=");
-  int_to_string(msg->msgId, tmp);
-  SCI_WRITE(&sci0, tmp);
-  SCI_WRITE(&sci0, ", nodeId=");
-  int_to_string(msg->nodeId, tmp);
-  SCI_WRITE(&sci0, tmp);
-  SCI_WRITE(&sci0, ", length=");
+  SCI_WRITE(&sci0, ": ");
+  print_dec_hex_field("msgId=", msg->msgId, 2);
+  SCI_WRITE(&sci0, ", ");
+  print_dec_hex_field("nodeId=", msg->nodeId, 1);
+  SCI_WRITE(&sci0, ", stdId=");
+  print_hex_fixed(std_id, 3);
+  SCI_WRITE(&sci0, ", bufLen=");
   int_to_string(msg->length, tmp);
   SCI_WRITE(&sci0, tmp);
-  SCI_WRITE(&sci0, ", data=");
-
-  if (msg->length == 0)
-  {
-    SCI_WRITE(&sci0, "[]\n");
-    return;
-  }
-
-  SCI_WRITE(&sci0, "[");
-  for (int i = 0; i < msg->length; i++)
-  {
-    if (i > 0) SCI_WRITE(&sci0, " ");
-    int_to_string(msg->buff[i], tmp);
-    SCI_WRITE(&sci0, tmp);
-  }
-  SCI_WRITE(&sci0, "]\n");
+  SCI_WRITE(&sci0, ", buf=");
+  print_can_buffer(msg);
+  SCI_WRITE(&sci0, "\n");
 }
 
 static void print_can_msg(CANMsg *msg)
