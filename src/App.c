@@ -73,11 +73,19 @@ static void print_hex_fixed(unsigned int value, int digits);
 static void print_dec_hex_field(char *label, unsigned int value, int hex_digits);
 static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
+static void cancel_pending_msg(Msg *slot);
 
 static unsigned int simple_rand(void)
 {
   rand_state = rand_state * 1664525u + 1013904223u;
   return rand_state;
+}
+
+static void cancel_pending_msg(Msg *slot)
+{
+  if (*slot == NULL) return;
+  ABORT(*slot);
+  *slot = NULL;
 }
 
 // Resets the program state to its initial values
@@ -529,7 +537,7 @@ void play_one_note(App *self, int note_index)
   SYNC(&tone_task, tone_set_period, period);
   SYNC(&tone_task, tone_set_mute, 0);
 
-  // start 10ms heartbeat loop while playing
+  // start heartbeat loop while playing
   self->note_hb_session++;
   SEND(MSEC(100), MSEC(2), self, send_note_hb, self->note_hb_session);
 
@@ -562,7 +570,7 @@ void send_note_hb(App *self, int session)
   if (self->is_silent) return;
   if (self->active_count > 1)
     send_heartbeat_now(self);
-  SEND(MSEC(10), MSEC(2), self, send_note_hb, session);
+  SEND(MSEC(100), MSEC(2), self, send_note_hb, session);
 }
 
 void send_cond_hb(App *self, int session)
@@ -578,6 +586,7 @@ void send_cond_hb(App *self, int session)
 void watchdog_fire(App *self, int session)
 {
   if (session != self->watchdog_session) return;
+  self->watchdog_msg = NULL;
   // the note-player missed its slot — skip it and send next token
   int next = (self->last_token_index + 1) & 0xFF;
   self->last_token_index = next;
@@ -588,6 +597,7 @@ void watchdog_fire(App *self, int session)
 void conductor_wd_fire(App *self, int session)
 {
   if (session != self->cond_wd_session) return;
+  self->cond_wd_msg = NULL;
   // conductor gone — elect lowest active rank
   remove_active_node(self, self->conductor_id);
   if (lowest_active_nodeId(self) == self->node_id)
@@ -598,13 +608,15 @@ static void reset_watchdog(App *self)
 {
   int session = ++self->watchdog_session;
   int delay = 200 + self->rank * 200;
-  SEND(MSEC(delay), MSEC(10), self, watchdog_fire, session);
+  cancel_pending_msg(&self->watchdog_msg);
+  self->watchdog_msg = SEND(MSEC(delay), MSEC(10), self, watchdog_fire, session);
 }
 
 static void reset_conductor_wd(App *self)
 {
   int session = ++self->cond_wd_session;
-  SEND(MSEC(500), MSEC(20), self, conductor_wd_fire, session);
+  cancel_pending_msg(&self->cond_wd_msg);
+  self->cond_wd_msg = SEND(MSEC(500), MSEC(20), self, conductor_wd_fire, session);
 }
 
 static void do_discovery(App *self)
@@ -641,6 +653,8 @@ static void enter_silent_failure(App *self, int mode)
   self->cond_hb_session++;
   self->watchdog_session++;
   self->cond_wd_session++;
+  cancel_pending_msg(&self->watchdog_msg);
+  cancel_pending_msg(&self->cond_wd_msg);
   self->play_session++;
   self->status = 0;
   SYNC(&tone_task, tone_set_mute, 1);
@@ -692,6 +706,8 @@ static void become_conductor(App *self, int reason)
   // cancel musician watchdog
   self->watchdog_session++;
   self->cond_wd_session++;
+  cancel_pending_msg(&self->watchdog_msg);
+  cancel_pending_msg(&self->cond_wd_msg);
 
   if (reason == COND_REASON_MANUAL)
     SCI_WRITE(&sci0, "\nClaimed Conductorship\n");

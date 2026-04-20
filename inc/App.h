@@ -58,6 +58,8 @@ typedef struct
   int last_token_node;
   int watchdog_session;
   int cond_wd_session;
+  Msg watchdog_msg;
+  Msg cond_wd_msg;
   int note_hb_session;
   int cond_hb_session;
   int print_session;
@@ -70,7 +72,7 @@ typedef struct
   int print_enabled;  // enable/disable periodic tempo/MUTED printing
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, 0, 0, 0, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 
 void reader(App *, int);
 void receiver(App *, int);
