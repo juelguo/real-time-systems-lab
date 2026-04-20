@@ -76,6 +76,24 @@ static unsigned int simple_rand(void)
   return rand_state;
 }
 
+// Resets the program state to its initial values
+static void reset_program_state(void)
+{
+  App fresh_app = initApp();
+  ToneTask fresh_tone = initToneTask();
+  Can fresh_can = initCan(CAN_PORT0, &app, receiver);
+  Serial fresh_sci = initSerial(SCI_PORT0, &app, reader);
+
+  app = fresh_app;
+  tone_task = fresh_tone;
+  can0 = fresh_can;
+  sci0 = fresh_sci;
+
+  output_muted = 0;
+  volume_before_output_mute = DEFAULT_VOLUME;
+  rand_state = 12345u;
+}
+
 static int rand_range(int lo, int hi)
 {
   return lo + (int)(simple_rand() % (unsigned int)(hi - lo + 1));
@@ -1286,6 +1304,8 @@ void startApp(App *self, int arg)
 
 int main()
 {
+  reset_program_state();
+
   INSTALL(&sci0, sci_interrupt, SCI_IRQ0);
   INSTALL(&can0, can_interrupt, CAN_IRQ0);
   TINYTIMBER(&app, startApp, 0);
