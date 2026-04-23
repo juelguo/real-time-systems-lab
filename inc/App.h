@@ -73,11 +73,12 @@ typedef struct
   int silent_mode;
   int silent_session;
   int was_conductor;
+  int rejoin_after_silent;
   int can_err_count;
   int print_enabled;  // enable/disable periodic tempo/MUTED printing
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, {0}, 0, 0, 0, 0, 0, -1, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, {0}, 0, 0, 0, 0, 0, -1, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 
 void reader(App *, int);
 void receiver(App *, int);

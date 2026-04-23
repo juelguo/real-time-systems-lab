@@ -62,7 +62,7 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 0
+#define ENABLE_PROBLEM_4 1
 
 extern App app;
 extern ToneTask tone_task;
@@ -267,6 +267,34 @@ static int lowest_active_nodeId(App *self)
 {
   if (self->active_count == 0) return self->node_id;
   return self->active_nodes[0];
+}
+
+static void replace_active_nodes_from_announce(App *self, CANMsg *msg, int new_cond)
+{
+  int old_active_count = self->active_count;
+  int old_active_nodes[16];
+  for (int i = 0; i < old_active_count; i++)
+    old_active_nodes[i] = self->active_nodes[i];
+
+  self->active_count = 0;
+  if (is_valid_node_id(new_cond))
+    add_active_node(self, new_cond);
+
+  for (int i = 1; i < msg->length; i++)
+  {
+    int nid = (int)msg->buff[i];
+    if (is_valid_node_id(nid))
+      add_active_node(self, nid);
+  }
+  if (!self->is_silent)
+    add_active_node(self, self->node_id);
+
+  for (int i = 0; i < old_active_count; i++)
+  {
+    if (!arr_contains(self->active_nodes, self->active_count, old_active_nodes[i]))
+      add_known_node(self, old_active_nodes[i]);
+  }
+  self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
 }
 #endif
 
@@ -790,7 +818,7 @@ void send_cond_hb(App *self, int session)
   if (session != self->cond_hb_session) return;
   if (self->is_silent) return;
   if (self->role != CONDUCTOR_ROLE) return;
-  if (self->active_count > 1)
+  if (self->active_count > 1 || self->pending_join_count > 0)
     send_heartbeat_now(self);
   SEND(MSEC(100), MSEC(5), self, send_cond_hb, session);
 #else
@@ -837,12 +865,28 @@ void conductor_wd_fire(App *self, int session)
 #if ENABLE_PROBLEM_4
   if (session != self->cond_wd_session) return;
   self->cond_wd_msg = NULL;
-  // conductor gone — elect lowest active rank
-  remove_active_node(self, self->conductor_id);
+  if (self->is_silent || self->role == CONDUCTOR_ROLE) return;
+  if (!is_valid_node_id(self->conductor_id)) return;
+
+  int failed_conductor = self->conductor_id;
+  self->conductor_id = -1;
+  mark_node_failed(self, failed_conductor);
+
+  if (!arr_contains(self->active_nodes, self->active_count, self->node_id))
+    add_active_node(self, self->node_id);
+
   if (lowest_active_nodeId(self) == self->node_id)
   {
     become_conductor(self, COND_REASON_AUTO);
     send_conductor_announce(self);
+    if (self->song_active &&
+        self->status == 0 &&
+        self->active_count > 0 &&
+        self->rank >= 0 &&
+        (self->last_token_index % self->active_count) == self->rank)
+    {
+      play_one_note(self, self->last_token_index);
+    }
   }
 #else
   (void)self;
@@ -864,6 +908,12 @@ static void reset_watchdog(App *self)
 #if ENABLE_PROBLEM_4
 static void reset_conductor_wd(App *self)
 {
+  if (self->is_silent) return;
+  if (self->role == CONDUCTOR_ROLE) return;
+  if (!is_valid_node_id(self->conductor_id)) return;
+  if (!arr_contains(self->active_nodes, self->active_count, self->node_id)) return;
+  if (!arr_contains(self->active_nodes, self->active_count, self->conductor_id)) return;
+
   int session = ++self->cond_wd_session;
   cancel_pending_msg(&self->cond_wd_msg);
   self->cond_wd_msg = SEND(MSEC(500), MSEC(20), self, conductor_wd_fire, session);
@@ -894,14 +944,21 @@ void discovery_timeout(App *self, int session)
       send_token(self, 0);
   }
 #if ENABLE_PROBLEM_4
-  if (self->active_count <= 1 &&
+  if (self->rejoin_after_silent &&
+      self->active_count <= 1 &&
       (self->conductor_id < 0 ||
        !arr_contains(self->active_nodes, self->active_count, self->conductor_id)))
   {
+    self->rejoin_after_silent = 0;
     become_conductor(self, COND_REASON_DEAD);
     send_conductor_announce(self);
     self->song_active = 1;
+    self->last_token_index = 0;
     send_token(self, 0);
+  }
+  else
+  {
+    self->rejoin_after_silent = 0;
   }
 #endif
 }
@@ -960,6 +1017,7 @@ static void leave_silent_failure(App *self)
     self->role = MUSICIAN_ROLE;
     SCI_WRITE(&sci0, "\nI Now Join As A Musician\n");
   }
+  self->rejoin_after_silent = 1;
   // re-run discovery; if network is dead (no other active nodes),
   // the node becomes conductor after the 500ms window (handled below)
   self->active_count = 0;
@@ -1018,6 +1076,9 @@ static void become_musician(App *self, int reason)
   self->print_session++;
   if (was_cond && reason == MUSICIAN_REASON_DISPLACED)
     SCI_WRITE(&sci0, "\nConductorship Void\n");
+#if ENABLE_PROBLEM_4
+  reset_conductor_wd(self);
+#endif
 }
 
 static void claim_conductorship(App *self)
@@ -1086,30 +1147,58 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
 
   add_known_node(self, new_cond);
 
-  // An announce proves the conductor is alive, but it is not a fresh
-  // discovery result. Preserve our local active list and only merge IDs.
-  add_active_node(self, new_cond);
-  for (int i = 0; i < msg->length; i++)
+  if (msg->length > 1)
   {
-    if (is_valid_node_id((int)msg->buff[i]))
-    {
-      add_active_node(self, msg->buff[i]);
-      add_known_node(self, msg->buff[i]);
-    }
-  }
-#if ENABLE_PROBLEM_3
-  if (!self->is_silent)
-    add_active_node(self, self->node_id);
+#if ENABLE_PROBLEM_4
+    replace_active_nodes_from_announce(self, msg, new_cond);
 #else
-  add_active_node(self, self->node_id);
+    add_active_node(self, new_cond);
+    for (int i = 0; i < msg->length; i++)
+    {
+      if (is_valid_node_id((int)msg->buff[i]))
+      {
+        add_active_node(self, msg->buff[i]);
+        add_known_node(self, msg->buff[i]);
+      }
+    }
+#if ENABLE_PROBLEM_3
+    if (!self->is_silent)
+      add_active_node(self, self->node_id);
+#else
+    add_active_node(self, self->node_id);
 #endif
+#endif
+  }
+  else
+  {
+    add_active_node(self, new_cond);
+    for (int i = 0; i < msg->length; i++)
+    {
+      if (is_valid_node_id((int)msg->buff[i]))
+      {
+        add_active_node(self, msg->buff[i]);
+        add_known_node(self, msg->buff[i]);
+      }
+    }
+#if ENABLE_PROBLEM_3
+    if (!self->is_silent)
+      add_active_node(self, self->node_id);
+#else
+    add_active_node(self, self->node_id);
+#endif
+  }
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
   self->conductor_id = new_cond;
   self->discovery_done = 1;
   if (new_cond == self->node_id)
-    become_conductor(self, COND_REASON_MANUAL);
+  {
+    if (self->role != CONDUCTOR_ROLE)
+      become_conductor(self, COND_REASON_MANUAL);
+  }
   else
+  {
     become_musician(self, MUSICIAN_REASON_DISPLACED);
+  }
 }
 
 static void handle_token(App *self, CANMsg *msg)
@@ -1141,8 +1230,8 @@ static void handle_token(App *self, CANMsg *msg)
   reset_watchdog(self);
 #endif
 #if ENABLE_PROBLEM_4
-  // reset conductor watchdog
-  reset_conductor_wd(self);
+  if (msg->nodeId == self->conductor_id)
+    reset_conductor_wd(self);
 #endif
   // play if it's our turn
   if (!self->is_silent && self->active_count > 0 && (idx % self->active_count) == self->rank)
@@ -1201,6 +1290,9 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
     if (msg->length < 3) return;
     apply_tempo(self, ((int)msg->buff[1] << 8) | (int)msg->buff[2]);
   }
+#if ENABLE_PROBLEM_4
+  reset_conductor_wd(self);
+#endif
 }
 
 void receiver(App *self, int unused)
