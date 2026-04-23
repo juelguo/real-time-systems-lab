@@ -59,11 +59,11 @@ const int MIN_SHIFT = -10;
 #define TOKEN_NO_FAILED_NODE 0
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
-#define HEARTBEAT_LOG_SUMMARY_EVERY 20
+#define HEARTBEAT_LOG_SUMMARY_EVERY 100
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 1
+#define ENABLE_PROBLEM_4 0
 
 extern App app;
 extern ToneTask tone_task;
@@ -89,6 +89,7 @@ static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
 static void print_can_msg_filtered(const char *prefix, CANMsg *msg, int is_tx);
 static void print_can_heartbeat_summary(void);
+static void print_node_event(App *self, char *event, int node_id);
 static void cancel_pending_msg(Msg *slot);
 static void tone_schedule_next(ToneTask *self, int state);
 static void enter_silent_failure(App *self, int mode);
@@ -191,14 +192,82 @@ static int arr_rank_of(int *arr, int count, int val)
   return -1;
 }
 
-static void add_active_node(App *self, int nid)
+static void print_node_event(App *self, char *event, int node_id)
 {
+  if (self == NULL || !is_valid_node_id(self->node_id) || !is_valid_node_id(node_id)) return;
+
+  char tmp[12];
+  SCI_WRITE(&sci0, "\nEVENT ");
+  SCI_WRITE(&sci0, event);
+  SCI_WRITE(&sci0, ": node ");
+  int_to_string(node_id, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, " (local=");
+  int_to_string(self->node_id, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, ", role=");
+  if (self->role == CONDUCTOR_ROLE)
+    SCI_WRITE(&sci0, "CONDUCTOR");
+  else
+    SCI_WRITE(&sci0, "MUSICIAN");
+  SCI_WRITE(&sci0, ", conductor=");
+  if (is_valid_node_id(self->conductor_id))
+    int_to_string(self->conductor_id, tmp);
+  else
+    strcpy(tmp, "none");
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, ", active=");
+  int_to_string(self->active_count, tmp);
+  SCI_WRITE(&sci0, tmp);
+#if ENABLE_PROBLEM_3
+  SCI_WRITE(&sci0, ", pending=");
+  int_to_string(self->pending_join_count, tmp);
+  SCI_WRITE(&sci0, tmp);
+#endif
+  SCI_WRITE(&sci0, ", rank=");
+  int_to_string(self->rank, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, ", song=");
+  if (self->song_active)
+    SCI_WRITE(&sci0, "ON");
+  else
+    SCI_WRITE(&sci0, "OFF");
+  SCI_WRITE(&sci0, ")\n");
+}
+
+static void add_active_node_silent(App *self, int nid)
+{
+  if (!is_valid_node_id(nid)) return;
   arr_insert_sorted(self->active_nodes, &self->active_count, nid);
   arr_insert_sorted(self->known_nodes, &self->known_count, nid);
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
   arr_remove(self->pending_join_nodes, &self->pending_join_count, nid);
 #endif
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
+}
+
+static void add_active_node(App *self, int nid)
+{
+  if (!is_valid_node_id(nid)) return;
+  int was_active = arr_contains(self->active_nodes, self->active_count, nid);
+  int was_known = arr_contains(self->known_nodes, self->known_count, nid);
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+  int was_pending = arr_contains(self->pending_join_nodes, self->pending_join_count, nid);
+#else
+  int was_pending = 0;
+#endif
+
+  add_active_node_silent(self, nid);
+
+  if (!was_active)
+  {
+    if (was_pending)
+      print_node_event(self, "NODE_JOINED_FROM_PENDING", nid);
+    else if (was_known)
+      print_node_event(self, "NODE_RECOVERED", nid);
+    else
+      print_node_event(self, "NODE_JOINED", nid);
+  }
 }
 
 static void add_known_node(App *self, int nid)
@@ -210,16 +279,24 @@ static void add_known_node(App *self, int nid)
 static void stage_join_node(App *self, int nid)
 {
   if (!is_valid_node_id(nid)) return;
+  int was_known = arr_contains(self->known_nodes, self->known_count, nid);
+  int was_pending = arr_contains(self->pending_join_nodes, self->pending_join_count, nid);
   add_known_node(self, nid);
   if (arr_contains(self->active_nodes, self->active_count, nid)) return;
   arr_insert_sorted(self->pending_join_nodes, &self->pending_join_count, nid);
+  if (!was_pending)
+    print_node_event(self, was_known ? "NODE_RECOVERY_PENDING" : "NODE_JOIN_PENDING", nid);
 }
 
 static void apply_pending_joins(App *self)
 {
   if (self->is_silent || self->pending_join_count == 0) return;
-  for (int i = 0; i < self->pending_join_count; i++)
-    add_active_node(self, self->pending_join_nodes[i]);
+  int join_count = self->pending_join_count;
+  int join_nodes[16];
+  for (int i = 0; i < join_count; i++)
+    join_nodes[i] = self->pending_join_nodes[i];
+  for (int i = 0; i < join_count; i++)
+    add_active_node(self, join_nodes[i]);
   self->pending_join_count = 0;
 }
 #endif
@@ -234,9 +311,14 @@ static void remove_active_node(App *self, int nid)
 static void mark_node_failed(App *self, int failed_node)
 {
   if (!is_valid_node_id(failed_node)) return;
+  int was_known = arr_contains(self->known_nodes, self->known_count, failed_node);
+  int was_active = arr_contains(self->active_nodes, self->active_count, failed_node);
+  int was_pending = arr_contains(self->pending_join_nodes, self->pending_join_count, failed_node);
   add_known_node(self, failed_node);
   arr_remove(self->pending_join_nodes, &self->pending_join_count, failed_node);
   remove_active_node(self, failed_node);
+  if (was_active || was_pending || !was_known)
+    print_node_event(self, "NODE_FAILED", failed_node);
 }
 #endif
 
@@ -288,26 +370,44 @@ static void replace_active_nodes_from_announce(App *self, CANMsg *msg, int new_c
   int old_active_nodes[16];
   for (int i = 0; i < old_active_count; i++)
     old_active_nodes[i] = self->active_nodes[i];
+  int old_known_count = self->known_count;
+  int old_known_nodes[16];
+  for (int i = 0; i < old_known_count; i++)
+    old_known_nodes[i] = self->known_nodes[i];
 
   self->active_count = 0;
   if (is_valid_node_id(new_cond))
-    add_active_node(self, new_cond);
+    add_active_node_silent(self, new_cond);
 
   for (int i = 1; i < msg->length; i++)
   {
     int nid = (int)msg->buff[i];
     if (is_valid_node_id(nid))
-      add_active_node(self, nid);
+      add_active_node_silent(self, nid);
   }
   if (!self->is_silent)
-    add_active_node(self, self->node_id);
+    add_active_node_silent(self, self->node_id);
 
+  self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
   for (int i = 0; i < old_active_count; i++)
   {
     if (!arr_contains(self->active_nodes, self->active_count, old_active_nodes[i]))
+    {
       add_known_node(self, old_active_nodes[i]);
+      print_node_event(self, "NODE_FAILED", old_active_nodes[i]);
+    }
   }
-  self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
+  for (int i = 0; i < self->active_count; i++)
+  {
+    int nid = self->active_nodes[i];
+    if (!arr_contains(old_active_nodes, old_active_count, nid))
+    {
+      if (arr_contains(old_known_nodes, old_known_count, nid))
+        print_node_event(self, "NODE_RECOVERED", nid);
+      else
+        print_node_event(self, "NODE_JOINED", nid);
+    }
+  }
 }
 #endif
 
@@ -842,8 +942,11 @@ void play_one_note(App *self, int note_index)
   SYNC(&tone_task, tone_set_period, period);
   SYNC(&tone_task, tone_set_mute, 0);
 
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+  send_heartbeat_now(self);
+#endif
+
 #if ENABLE_PROBLEM_3
-  // start heartbeat loop while playing
   self->note_hb_session++;
   SEND(MSEC(100), MSEC(2), self, send_note_hb, self->note_hb_session);
 #endif
@@ -887,7 +990,7 @@ void send_note_hb(App *self, int session)
 #if ENABLE_PROBLEM_3
   if (session != self->note_hb_session) return;
   if (self->is_silent) return;
-  if (self->active_count > 1)
+  if (is_valid_node_id(self->node_id))
     send_heartbeat_now(self);
   SEND(MSEC(100), MSEC(2), self, send_note_hb, session);
 #else
@@ -898,9 +1001,13 @@ void send_note_hb(App *self, int session)
 
 void send_cond_hb(App *self, int session)
 {
-#if ENABLE_PROBLEM_4
-  (void)self;
-  (void)session;
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+  if (session != self->cond_hb_session) return;
+  if (self->is_silent) return;
+  if (self->role != CONDUCTOR_ROLE) return;
+  if (is_valid_node_id(self->node_id))
+    send_heartbeat_now(self);
+  SEND(MSEC(100), MSEC(2), self, send_cond_hb, session);
 #else
   (void)self;
   (void)session;
@@ -958,7 +1065,7 @@ void conductor_wd_fire(App *self, int session)
   if (lowest_active_nodeId(self) == self->node_id)
   {
     become_conductor(self, COND_REASON_AUTO);
-    send_conductor_announce(self);
+    send_conductor_discovery_state(self);
     if (self->song_active &&
         self->status == 0 &&
         self->active_count > 0 &&
@@ -1015,7 +1122,7 @@ void discovery_timeout(App *self, int session)
   if (session != self->disc_session) return;
   self->discovery_done = 1;
   if (self->role == CONDUCTOR_ROLE)
-    send_conductor_announce(self);
+    send_conductor_discovery_state(self);
 
   if (self->start_after_discovery)
   {
@@ -1031,9 +1138,9 @@ void discovery_timeout(App *self, int session)
   {
     self->rejoin_after_silent = 0;
     become_conductor(self, COND_REASON_DEAD);
-    send_conductor_announce(self);
     self->song_active = 1;
     self->last_token_index = 0;
+    send_conductor_discovery_state(self);
     send_token(self, 0);
   }
   else
@@ -1067,6 +1174,14 @@ static void enter_silent_failure(App *self, int mode)
   if (self->was_conductor)
     SCI_WRITE(&sci0, "\nConductorship Void Due To Failure\n");
   SCI_WRITE(&sci0, "\nSilent Failure\n");
+  if (mode == SILENT_F1)
+    print_node_event(self, "NODE_FAILED_LOCAL_F1", self->node_id);
+  else if (mode == SILENT_F2)
+    print_node_event(self, "NODE_FAILED_LOCAL_F2", self->node_id);
+  else if (mode == SILENT_F3)
+    print_node_event(self, "NODE_FAILED_LOCAL_F3", self->node_id);
+  else
+    print_node_event(self, "NODE_FAILED_LOCAL", self->node_id);
   if (mode == SILENT_F2)
   {
     // schedule auto exit in 5-10s
@@ -1124,9 +1239,13 @@ static void become_conductor(App *self, int reason)
 {
   self->role = CONDUCTOR_ROLE;
   self->conductor_id = self->node_id;
-#if ENABLE_PROBLEM_4
-  // Heartbeats are only sent by send_note_hb() while this node is playing a note.
-  self->cond_hb_session++;
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+  int hb_session = ++self->cond_hb_session;
+  if (!self->is_silent && is_valid_node_id(self->node_id))
+  {
+    send_heartbeat_now(self);
+    SEND(MSEC(100), MSEC(2), self, send_cond_hb, hb_session);
+  }
 #endif
   // cancel musician watchdog
   self->watchdog_session++;
@@ -1162,8 +1281,11 @@ static void become_musician(App *self, int reason)
 
 static void claim_conductorship(App *self)
 {
+  if (self->is_silent) return;
+  if (!arr_contains(self->active_nodes, self->active_count, self->node_id))
+    add_active_node(self, self->node_id);
   become_conductor(self, COND_REASON_MANUAL);
-  send_conductor_announce(self);
+  send_conductor_discovery_state(self);
 }
 
 static void handle_discovery_ping(App *self, CANMsg *msg)
@@ -1172,7 +1294,6 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
   if (!is_valid_node_id(sender)) return;
   int was_active = arr_contains(self->active_nodes, self->active_count, sender);
 
-  add_known_node(self, sender);
   if (!was_active)
   {
 #if ENABLE_PROBLEM_3
@@ -1183,6 +1304,10 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
 #else
     add_active_node(self, sender);
 #endif
+  }
+  else
+  {
+    add_known_node(self, sender);
   }
 
 #if ENABLE_PROBLEM_3
@@ -1200,8 +1325,8 @@ static void handle_discovery_reply(App *self, CANMsg *msg)
 {
   int sender = msg->nodeId;
 
-  // Keep compatibility with older reply frames that encoded the sender only in buff[0].
-  if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
+  // Trust the CAN identifier first; fall back for frames that only encode the sender in buff[0].
+  if (!is_valid_node_id(sender) && msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
     sender = msg->buff[0];
   if (!is_valid_node_id(sender)) return;
 
@@ -1220,12 +1345,11 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
 {
   int new_cond = msg->nodeId;
 
-  if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
+  if (!is_valid_node_id(new_cond) && msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
     new_cond = msg->buff[0];
   if (!is_valid_node_id(new_cond)) return;
 
-  add_known_node(self, new_cond);
-
+  self->conductor_id = new_cond;
   if (msg->length > 1)
   {
 #if ENABLE_PROBLEM_4
@@ -1251,14 +1375,8 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
   else
   {
     add_active_node(self, new_cond);
-    for (int i = 0; i < msg->length; i++)
-    {
-      if (is_valid_node_id((int)msg->buff[i]))
-      {
-        add_active_node(self, msg->buff[i]);
-        add_known_node(self, msg->buff[i]);
-      }
-    }
+    if (!is_valid_node_id(msg->nodeId) && msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
+      add_known_node(self, msg->buff[0]);
 #if ENABLE_PROBLEM_3
     if (!self->is_silent)
       add_active_node(self, self->node_id);
@@ -1267,7 +1385,6 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
 #endif
   }
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
-  self->conductor_id = new_cond;
   self->discovery_done = 1;
   if (new_cond == self->node_id)
   {
@@ -1283,6 +1400,18 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
 static void handle_token(App *self, CANMsg *msg)
 {
   if (msg->length < 1) return;
+  if (is_valid_node_id(msg->nodeId))
+  {
+    if (msg->nodeId == self->conductor_id &&
+        !arr_contains(self->active_nodes, self->active_count, msg->nodeId))
+    {
+      add_active_node(self, msg->nodeId);
+    }
+    else
+    {
+      add_known_node(self, msg->nodeId);
+    }
+  }
   int idx = (int)msg->buff[0];
   int failed_node = -1;
 #if ENABLE_PROBLEM_3
