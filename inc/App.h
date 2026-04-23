@@ -53,8 +53,11 @@ typedef struct
   int active_count;
   int known_nodes[16];   // all known nodes
   int known_count;
+  int pending_join_nodes[16]; // nodes waiting to join at the next token boundary
+  int pending_join_count;
   int discovery_done;
   int disc_session;
+  int start_after_discovery;
   int last_token_index;
   int last_token_node;
   int pending_failed_node;
@@ -74,7 +77,7 @@ typedef struct
   int print_enabled;  // enable/disable periodic tempo/MUTED printing
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, 0, 0, 0, -1, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, MUSICIAN_ROLE, 0, 0, 120, 1, 0, 0, 0, -1, -1, -1, {0}, 0, {0}, 0, {0}, 0, 0, 0, 0, 0, -1, -1, 0, 0, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
 
 void reader(App *, int);
 void receiver(App *, int);

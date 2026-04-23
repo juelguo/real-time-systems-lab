@@ -182,6 +182,9 @@ static void add_active_node(App *self, int nid)
 {
   arr_insert_sorted(self->active_nodes, &self->active_count, nid);
   arr_insert_sorted(self->known_nodes, &self->known_count, nid);
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+  arr_remove(self->pending_join_nodes, &self->pending_join_count, nid);
+#endif
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
 }
 
@@ -189,6 +192,24 @@ static void add_known_node(App *self, int nid)
 {
   arr_insert_sorted(self->known_nodes, &self->known_count, nid);
 }
+
+#if ENABLE_PROBLEM_3
+static void stage_join_node(App *self, int nid)
+{
+  if (!is_valid_node_id(nid)) return;
+  add_known_node(self, nid);
+  if (arr_contains(self->active_nodes, self->active_count, nid)) return;
+  arr_insert_sorted(self->pending_join_nodes, &self->pending_join_count, nid);
+}
+
+static void apply_pending_joins(App *self)
+{
+  if (self->is_silent || self->pending_join_count == 0) return;
+  for (int i = 0; i < self->pending_join_count; i++)
+    add_active_node(self, self->pending_join_nodes[i]);
+  self->pending_join_count = 0;
+}
+#endif
 
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
 static void remove_active_node(App *self, int nid)
@@ -201,6 +222,7 @@ static void mark_node_failed(App *self, int failed_node)
 {
   if (!is_valid_node_id(failed_node)) return;
   add_known_node(self, failed_node);
+  arr_remove(self->pending_join_nodes, &self->pending_join_count, failed_node);
   remove_active_node(self, failed_node);
 }
 #endif
@@ -300,6 +322,12 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
   if (token_index < 0) token_index += MELODY_NOTE_COUNT;
   int token_failed = is_valid_node_id(failed_node) ? failed_node : TOKEN_NO_FAILED_NODE;
 
+#if ENABLE_PROBLEM_3
+  if (is_valid_node_id(token_failed))
+    mark_node_failed(self, token_failed);
+  apply_pending_joins(self);
+#endif
+
   if (self->active_count == 1 && self->rank == 0)
   {
     self->last_token_index = token_index;
@@ -312,6 +340,15 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
   d[0] = (uchar)token_index;
   d[1] = (uchar)token_failed;
   can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 2);
+
+  if (self->active_count > 0 &&
+      self->rank >= 0 &&
+      (token_index % self->active_count) == self->rank)
+  {
+    self->last_token_index = token_index;
+    self->last_token_node = self->node_id;
+    play_one_note(self, token_index);
+  }
 }
 
 static void send_token(App *self, int next_note_index)
@@ -449,6 +486,7 @@ static void print_can_msg(CANMsg *msg)
 // forward declarations
 static void become_conductor(App *self, int reason);
 static void become_musician(App *self, int reason);
+static void do_discovery(App *self);
 #if ENABLE_PROBLEM_3
 static void reset_watchdog(App *self);
 #endif
@@ -632,6 +670,7 @@ static void stop_local_playback(App *self)
   self->mute = 1;
   self->status = 0;
   self->pending_failed_node = -1;
+  self->start_after_discovery = 0;
 
 #if ENABLE_PROBLEM_3
   self->note_hb_session++;
@@ -651,7 +690,8 @@ void apply_play(App *self)
   self->status = 1;
   SYNC(&tone_task, tone_set_mute, 1);
   send_conductor_cmd(self, CAN_SUB_START, 0);
-  send_token(self, 0);
+  self->start_after_discovery = 1;
+  do_discovery(self);
 }
 
 void apply_stop(App *self)
@@ -776,8 +816,15 @@ void watchdog_fire(App *self, int session)
       self->rank >= 0 &&
       (self->last_token_index % self->active_count) == self->rank)
   {
-    self->pending_failed_node = failed_node;
+    if (self->pending_failed_node < 0)
+      self->pending_failed_node = failed_node;
     play_one_note(self, self->last_token_index);
+  }
+  else if (self->active_count > 0 && self->rank >= 0)
+  {
+    if (self->pending_failed_node < 0)
+      self->pending_failed_node = failed_node;
+    reset_watchdog(self);
   }
 #else
   (void)self;
@@ -837,6 +884,15 @@ void discovery_timeout(App *self, int session)
 {
   if (session != self->disc_session) return;
   self->discovery_done = 1;
+  if (self->role == CONDUCTOR_ROLE)
+    send_conductor_announce(self);
+
+  if (self->start_after_discovery)
+  {
+    self->start_after_discovery = 0;
+    if (self->role == CONDUCTOR_ROLE && self->song_active)
+      send_token(self, 0);
+  }
 #if ENABLE_PROBLEM_4
   if (self->active_count <= 1 &&
       (self->conductor_id < 0 ||
@@ -978,7 +1034,16 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
 
   add_known_node(self, sender);
   if (!was_active)
+  {
+#if ENABLE_PROBLEM_3
+    if (self->song_active)
+      stage_join_node(self, sender);
+    else
+      add_active_node(self, sender);
+#else
     add_active_node(self, sender);
+#endif
+  }
 
 #if ENABLE_PROBLEM_3
   // Always answer discovery while not silent so a fresh conductor scan keeps us active.
@@ -1000,7 +1065,14 @@ static void handle_discovery_reply(App *self, CANMsg *msg)
     sender = msg->buff[0];
   if (!is_valid_node_id(sender)) return;
 
+#if ENABLE_PROBLEM_3
+  if (self->song_active)
+    stage_join_node(self, sender);
+  else
+    add_active_node(self, sender);
+#else
   add_active_node(self, sender);
+#endif
   add_known_node(self, sender);
 }
 
@@ -1064,6 +1136,7 @@ static void handle_token(App *self, CANMsg *msg)
 #if ENABLE_PROBLEM_3
   if (failed_node >= 0)
     mark_node_failed(self, failed_node);
+  apply_pending_joins(self);
   // reset our watchdog
   reset_watchdog(self);
 #endif
@@ -1114,8 +1187,6 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
     self->song_active = 1;
     self->status = 1;
     SYNC(&tone_task, tone_set_mute, 1);
-    if (self->role == CONDUCTOR_ROLE)
-      send_token(self, 0);
   }
   else if (sub == CAN_SUB_STOP)
   {
@@ -1399,6 +1470,10 @@ void command_handler(App *self, char c)
         SCI_WRITE(&sci0, tmp);
         if (arr_contains(self->active_nodes, self->active_count, nid))
           SCI_WRITE(&sci0, " [active]");
+#if ENABLE_PROBLEM_3
+        else if (arr_contains(self->pending_join_nodes, self->pending_join_count, nid))
+          SCI_WRITE(&sci0, " [joining]");
+#endif
         else
           SCI_WRITE(&sci0, " [silent]");
         if (nid == self->conductor_id)
