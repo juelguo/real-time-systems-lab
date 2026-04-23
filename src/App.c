@@ -52,12 +52,15 @@ const int MIN_SHIFT = -10;
 #define CAN_SUB_STOP   2
 #define CAN_SUB_KEY    3
 #define CAN_SUB_TEMPO  4
+#define CAN_SUB_SET_KEY   CAN_SUB_KEY
+#define CAN_SUB_SET_TEMPO CAN_SUB_TEMPO
 #define CAN_NODE_BROADCAST 0x0F
+#define TOKEN_NO_FAILED_NODE 0xFF
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
 
-// Problem 3/4 reliability layers are disabled for the current demo.
-#define ENABLE_PROBLEM_3 0
+// Problem 3 musician failure recovery is enabled; Problem 4 remains optional.
+#define ENABLE_PROBLEM_3 1
 #define ENABLE_PROBLEM_4 0
 
 extern App app;
@@ -151,7 +154,7 @@ static int arr_contains(int *arr, int count, int val)
   return 0;
 }
 
-#if ENABLE_PROBLEM_4
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
 static void arr_remove(int *arr, int *count, int val)
 {
   for (int i = 0; i < *count; i++)
@@ -185,13 +188,22 @@ static void add_known_node(App *self, int nid)
   arr_insert_sorted(self->known_nodes, &self->known_count, nid);
 }
 
-#if ENABLE_PROBLEM_4
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
 static void remove_active_node(App *self, int nid)
 {
   arr_remove(self->active_nodes, &self->active_count, nid);
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
 }
 
+static void mark_node_failed(App *self, int failed_node)
+{
+  if (!is_valid_node_id(failed_node)) return;
+  add_known_node(self, failed_node);
+  remove_active_node(self, failed_node);
+}
+#endif
+
+#if ENABLE_PROBLEM_4
 static int lowest_active_nodeId(App *self)
 {
   if (self->active_count == 0) return self->node_id;
@@ -240,11 +252,12 @@ static void send_conductor_announce(App *self)
   can_send_raw(self, CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1 + count);
 }
 
-static void send_token(App *self, int next_note_index)
+static void send_token_with_failure(App *self, int next_note_index, int failed_node)
 {
   if (self->is_silent) return;
 
-  int token_index = next_note_index & 0xFFFF;
+  int token_index = next_note_index & 0xFF;
+  int token_failed = is_valid_node_id(failed_node) ? failed_node : TOKEN_NO_FAILED_NODE;
 
   if (self->active_count == 1 && self->rank == 0)
   {
@@ -255,9 +268,14 @@ static void send_token(App *self, int next_note_index)
   }
 
   uchar d[2];
-  d[0] = (uchar)(token_index & 0xFF);
-  d[1] = (uchar)((token_index >> 8) & 0xFF);
-  can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, token_index > 0xFF ? 2 : 1);
+  d[0] = (uchar)token_index;
+  d[1] = (uchar)token_failed;
+  can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 2);
+}
+
+static void send_token(App *self, int next_note_index)
+{
+  send_token_with_failure(self, next_note_index, TOKEN_NO_FAILED_NODE);
 }
 
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
@@ -291,6 +309,16 @@ static void send_conductor_cmd(App *self, int sub, int val)
 
   d[1] = (uchar)val;
   can_send_raw(self, CAN_MSG_CONDUCTOR_CMD, self->node_id, d, 2);
+}
+
+static void send_conductor_discovery_state(App *self)
+{
+  if (self->role != CONDUCTOR_ROLE) return;
+
+  send_conductor_announce(self);
+  send_conductor_cmd(self, CAN_SUB_SET_KEY, self->key);
+  send_conductor_cmd(self, CAN_SUB_SET_TEMPO, self->tempo);
+  send_conductor_cmd(self, self->song_active ? CAN_SUB_START : CAN_SUB_STOP, 0);
 }
 
 static char *can_msg_name(int msgId)
@@ -628,13 +656,19 @@ void finish_note(App *self, int session)
 
   SYNC(&tone_task, tone_set_mute, 1);
   self->status = 0;
-  if (!self->song_active) return;
+  if (!self->song_active)
+  {
+    self->pending_failed_node = -1;
+    return;
+  }
 
-  int next_abs = self->last_token_index + 1;
+  int next_abs = (self->last_token_index + 1) & 0xFF;
+  int failed_node = self->pending_failed_node;
+  self->pending_failed_node = -1;
   self->last_token_index = next_abs;
 
   // send next token to all
-  send_token(self, next_abs);
+  send_token_with_failure(self, next_abs, failed_node);
 }
 
 void send_note_hb(App *self, int session)
@@ -671,11 +705,21 @@ void watchdog_fire(App *self, int session)
 #if ENABLE_PROBLEM_3
   if (session != self->watchdog_session) return;
   self->watchdog_msg = NULL;
-  // the note-player missed its slot — skip it and send next token
-  int next = (self->last_token_index + 1) & 0xFF;
-  self->last_token_index = next;
-  if (self->role == CONDUCTOR_ROLE)
-    send_token(self, next);
+  if (self->is_silent || self->active_count <= 0) return;
+
+  int failed_rank = self->last_token_index % self->active_count;
+  int failed_node = self->active_nodes[failed_rank];
+  if (failed_node == self->node_id) return;
+
+  mark_node_failed(self, failed_node);
+
+  if (self->active_count > 0 &&
+      self->rank >= 0 &&
+      (self->last_token_index % self->active_count) == self->rank)
+  {
+    self->pending_failed_node = failed_node;
+    play_one_note(self, self->last_token_index);
+  }
 #else
   (void)self;
   (void)session;
@@ -700,6 +744,7 @@ void conductor_wd_fire(App *self, int session)
 #if ENABLE_PROBLEM_3
 static void reset_watchdog(App *self)
 {
+  if (self->is_silent || self->rank < 0) return;
   int session = ++self->watchdog_session;
   int delay = 200 + self->rank * 200;
   cancel_pending_msg(&self->watchdog_msg);
@@ -751,6 +796,7 @@ static void enter_silent_failure(App *self, int mode)
   self->cond_hb_session++;
   self->watchdog_session++;
   self->cond_wd_session++;
+  self->pending_failed_node = -1;
   cancel_pending_msg(&self->watchdog_msg);
   cancel_pending_msg(&self->cond_wd_msg);
   self->play_session++;
@@ -780,6 +826,7 @@ static void leave_silent_failure(App *self)
   if (!self->is_silent) return;
   self->is_silent = 0;
   self->silent_session++;
+  self->pending_failed_node = -1;
   SCI_WRITE(&sci0, "\nLeave Silent Failure\n");
   // if we were conductor, rejoin as musician (P4 requirement)
   if (self->was_conductor)
@@ -870,6 +917,8 @@ static void handle_discovery_ping(App *self, CANMsg *msg)
 #else
   send_discovery_reply(self, sender);
 #endif
+
+  send_conductor_discovery_state(self);
 }
 
 static void handle_discovery_reply(App *self, CANMsg *msg)
@@ -923,8 +972,11 @@ static void handle_token(App *self, CANMsg *msg)
 {
   if (msg->length < 1) return;
   int idx = (int)msg->buff[0];
-  if (msg->length >= 2)
-    idx |= ((int)msg->buff[1] << 8);
+  int failed_node = -1;
+#if ENABLE_PROBLEM_3
+  if (msg->length >= 2 && is_valid_node_id((int)msg->buff[1]))
+    failed_node = (int)msg->buff[1];
+#endif
   if (!self->song_active)
   {
     if (idx != 0)
@@ -936,7 +988,10 @@ static void handle_token(App *self, CANMsg *msg)
     self->song_active = 1;
   }
   self->last_token_index = idx;
+  self->last_token_node = msg->nodeId;
 #if ENABLE_PROBLEM_3
+  if (failed_node >= 0)
+    mark_node_failed(self, failed_node);
   // reset our watchdog
   reset_watchdog(self);
 #endif
@@ -958,7 +1013,8 @@ static void handle_heartbeat(App *self, CANMsg *msg)
     reset_conductor_wd(self);
 #endif
 #if ENABLE_PROBLEM_3
-  if (sender != self->conductor_id)
+  if (self->song_active && self->active_count > 0 &&
+      sender == self->active_nodes[self->last_token_index % self->active_count])
     reset_watchdog(self);
 #endif
 }
