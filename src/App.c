@@ -55,11 +55,12 @@ const int MIN_SHIFT = -10;
 #define CAN_SUB_SET_KEY   CAN_SUB_KEY
 #define CAN_SUB_SET_TEMPO CAN_SUB_TEMPO
 #define CAN_NODE_BROADCAST 0x0F
-#define TOKEN_NO_FAILED_NODE 0xFF
+#define MELODY_NOTE_COUNT 32
+#define TOKEN_NO_FAILED_NODE 0
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
 
-// Problem 3 musician failure recovery is enabled; Problem 4 remains optional.
+// Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
 #define ENABLE_PROBLEM_4 0
 
@@ -82,6 +83,7 @@ static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
 static void cancel_pending_msg(Msg *slot);
 static void tone_schedule_next(ToneTask *self, int state);
+static void enter_silent_failure(App *self, int mode);
 
 static void cancel_pending_msg(Msg *slot)
 {
@@ -126,7 +128,7 @@ static void reset_program_state(void)
 
 static int is_valid_node_id(int node_id)
 {
-  return node_id >= 0 && node_id <= 14;
+  return node_id >= 1 && node_id <= 14;
 }
 
 #if ENABLE_PROBLEM_3
@@ -203,6 +205,41 @@ static void mark_node_failed(App *self, int failed_node)
 }
 #endif
 
+#if ENABLE_PROBLEM_3
+// this function is designed for CAN message sending failures.
+static void handle_can_send_result(App *self, int status)
+{
+  if (self == NULL || self->is_silent) return;
+  if (status == 0)
+  {
+    self->can_err_count = 0;
+    return;
+  }
+
+  self->can_err_count++;
+  if (self->can_err_count < F3_FAIL_THRESHOLD) return;
+  self->can_err_count = 0;
+
+  // if only have two board, the condutor should not stop if the connection is lost
+  if (self->role == CONDUCTOR_ROLE && self->active_count <= 2)
+  {
+    for (int i = self->active_count - 1; i >= 0; i--)
+    {
+      int nid = self->active_nodes[i];
+      if (nid != self->node_id)
+        mark_node_failed(self, nid);
+    }
+    if (!arr_contains(self->active_nodes, self->active_count, self->node_id))
+      add_active_node(self, self->node_id);
+    if (self->song_active && self->rank == 0 && self->status == 0)
+      play_one_note(self, self->last_token_index);
+    return;
+  }
+
+  enter_silent_failure(self, SILENT_F3);
+}
+#endif
+
 #if ENABLE_PROBLEM_4
 static int lowest_active_nodeId(App *self)
 {
@@ -225,6 +262,9 @@ static int can_send_raw(App *self, int msgId, int nodeId, uchar *data, int len)
   int status = CAN_SEND(&can0, &msg);
   if (can_print_enabled && status == 0)
     print_can_msg_with_prefix("Sent", &msg);
+#if ENABLE_PROBLEM_3
+  handle_can_send_result(self, status);
+#endif
   return status;
 }
 
@@ -256,7 +296,8 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
 {
   if (self->is_silent) return;
 
-  int token_index = next_note_index & 0xFF;
+  int token_index = next_note_index % MELODY_NOTE_COUNT;
+  if (token_index < 0) token_index += MELODY_NOTE_COUNT;
   int token_failed = is_valid_node_id(failed_node) ? failed_node : TOKEN_NO_FAILED_NODE;
 
   if (self->active_count == 1 && self->rank == 0)
@@ -584,6 +625,25 @@ void apply_output_unmute(void)
   SYNC(&tone_task, tone_set_volume, clamp(volume_before_output_mute, MIN_VOLUME, MAX_VOLUME));
 }
 
+static void stop_local_playback(App *self)
+{
+  self->play_session++;
+  self->song_active = 0;
+  self->mute = 1;
+  self->status = 0;
+  self->pending_failed_node = -1;
+
+#if ENABLE_PROBLEM_3
+  self->note_hb_session++;
+  self->watchdog_session++;
+  cancel_pending_msg(&self->watchdog_msg);
+#endif
+
+  self->cond_wd_session++;
+  cancel_pending_msg(&self->cond_wd_msg);
+  SYNC(&tone_task, tone_set_mute, 1);
+}
+
 void apply_play(App *self)
 {
   self->play_session++;
@@ -596,11 +656,7 @@ void apply_play(App *self)
 
 void apply_stop(App *self)
 {
-  self->play_session++;
-  self->song_active = 0;
-  self->mute = 1;
-  self->status = 0;
-  SYNC(&tone_task, tone_set_mute, 1);
+  stop_local_playback(self);
   send_conductor_cmd(self, CAN_SUB_STOP, 0);
 }
 
@@ -613,7 +669,8 @@ void play_one_note(App *self, int note_index)
 
   int session = ++self->play_session;
   self->song_active = 1;
-  self->current_index = note_index & 31;
+  // self->current_index = note_index & 31;
+  self->current_index = note_index % MELODY_NOTE_COUNT;
   self->status = 1;
 
   int period = get_period(self->current_index, self->key);
@@ -621,12 +678,14 @@ void play_one_note(App *self, int note_index)
   int active_time = length - 50;
   if (active_time < 10) active_time = 10;
 
-  // conductor is legitimately idle while we play; extend its watchdog to cover our note
+  // Without P4 conductor heartbeats, the conductor is legitimately idle while we play.
+#if !ENABLE_PROBLEM_4
   {
     int session_cwd = ++self->cond_wd_session;
     cancel_pending_msg(&self->cond_wd_msg);
     self->cond_wd_msg = SEND(MSEC(length + 500), MSEC(20), self, conductor_wd_fire, session_cwd);
   }
+#endif
 
   SYNC(&tone_task, tone_set_period, period);
   SYNC(&tone_task, tone_set_mute, 0);
@@ -662,7 +721,7 @@ void finish_note(App *self, int session)
     return;
   }
 
-  int next_abs = (self->last_token_index + 1) & 0xFF;
+  int next_abs = (self->last_token_index + 1) % MELODY_NOTE_COUNT;
   int failed_node = self->pending_failed_node;
   self->pending_failed_node = -1;
   self->last_token_index = next_abs;
@@ -734,7 +793,10 @@ void conductor_wd_fire(App *self, int session)
   // conductor gone — elect lowest active rank
   remove_active_node(self, self->conductor_id);
   if (lowest_active_nodeId(self) == self->node_id)
+  {
     become_conductor(self, COND_REASON_AUTO);
+    send_conductor_announce(self);
+  }
 #else
   (void)self;
   (void)session;
@@ -775,13 +837,17 @@ void discovery_timeout(App *self, int session)
 {
   if (session != self->disc_session) return;
   self->discovery_done = 1;
-  // P4: if network is dead (only us responded) and no conductor, become conductor
-  // if (self->active_count <= 1 && self->conductor_id == -1)
-  // {
-  //   become_conductor(self, COND_REASON_DEAD);
-  //   send_conductor_announce(self);
-  //   send_token(self, 0);
-  // }
+#if ENABLE_PROBLEM_4
+  if (self->active_count <= 1 &&
+      (self->conductor_id < 0 ||
+       !arr_contains(self->active_nodes, self->active_count, self->conductor_id)))
+  {
+    become_conductor(self, COND_REASON_DEAD);
+    send_conductor_announce(self);
+    self->song_active = 1;
+    send_token(self, 0);
+  }
+#endif
 }
 
 static void enter_silent_failure(App *self, int mode)
@@ -791,6 +857,8 @@ static void enter_silent_failure(App *self, int mode)
   self->is_silent = 1;
   self->silent_mode = mode;
   self->was_conductor = (self->role == CONDUCTOR_ROLE);
+  if (self->was_conductor)
+    self->conductor_id = -1;
   // stop all timers
   self->note_hb_session++;
   self->cond_hb_session++;
@@ -825,6 +893,7 @@ static void leave_silent_failure(App *self)
 #if ENABLE_PROBLEM_3
   if (!self->is_silent) return;
   self->is_silent = 0;
+  self->can_err_count = 0;
   self->silent_session++;
   self->pending_failed_node = -1;
   SCI_WRITE(&sci0, "\nLeave Silent Failure\n");
@@ -904,6 +973,7 @@ static void claim_conductorship(App *self)
 static void handle_discovery_ping(App *self, CANMsg *msg)
 {
   int sender = msg->nodeId;
+  if (!is_valid_node_id(sender)) return;
   int was_active = arr_contains(self->active_nodes, self->active_count, sender);
 
   add_known_node(self, sender);
@@ -928,6 +998,7 @@ static void handle_discovery_reply(App *self, CANMsg *msg)
   // Keep compatibility with older reply frames that encoded the sender only in buff[0].
   if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
     sender = msg->buff[0];
+  if (!is_valid_node_id(sender)) return;
 
   add_active_node(self, sender);
   add_known_node(self, sender);
@@ -939,6 +1010,7 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
 
   if (msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
     new_cond = msg->buff[0];
+  if (!is_valid_node_id(new_cond)) return;
 
   add_known_node(self, new_cond);
 
@@ -1008,6 +1080,7 @@ static void handle_token(App *self, CANMsg *msg)
 static void handle_heartbeat(App *self, CANMsg *msg)
 {
   int sender = msg->nodeId;
+  if (!is_valid_node_id(sender)) return;
 #if ENABLE_PROBLEM_4
   if (sender == self->conductor_id)
     reset_conductor_wd(self);
@@ -1046,10 +1119,7 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
   }
   else if (sub == CAN_SUB_STOP)
   {
-    self->play_session++;
-    self->song_active = 0;
-    self->status = 0;
-    SYNC(&tone_task, tone_set_mute, 1);
+    stop_local_playback(self);
   }
   else if (sub == CAN_SUB_KEY)
   {
@@ -1068,6 +1138,12 @@ void receiver(App *self, int unused)
   CANMsg msg;
   if (CAN_RECEIVE(&can0, &msg) != 0)
     return;
+  self->can_err_count = 0;
+  if (self->is_silent && self->silent_mode == SILENT_F3)
+  {
+    leave_silent_failure(self);
+    return;
+  }
   if (can_print_enabled)
     print_can_msg(&msg);
   if (msg.msgId == CAN_MSG_DISCOVERY_PING)
@@ -1118,7 +1194,7 @@ void print_helper(App *self)
   // SCI_WRITE(&sci0, "  h/help\n");
   SCI_WRITE(&sci0, "  p/play, q/stop, s/mute, r/unmute\n");
   SCI_WRITE(&sci0, "  t/tempo 60-240, k/key -5..5, v/volume 0-20\n");
-  SCI_WRITE(&sci0, "  node <id> 0-14, claim, R reset key+tempo\n");
+  SCI_WRITE(&sci0, "  node <id> 1-14, claim, R reset key+tempo\n");
   SCI_WRITE(&sci0, "  m/member, I info, T audio mute\n");
   SCI_WRITE(&sci0, "  P periodic print, L/canlog\n");
 #if ENABLE_PROBLEM_3
@@ -1240,7 +1316,7 @@ void command_handler(App *self, char c)
       }
       if (arg == end || end == NULL || *end != '\0' || !is_valid_node_id((int)id))
       {
-        SCI_WRITE(&sci0, "\nInvalid node id. Use 'node <id>' with 0-14.\n");
+        SCI_WRITE(&sci0, "\nInvalid node id. Use 'node <id>' with 1-14.\n");
         print_helper(self);
         return;
       }

@@ -61,9 +61,18 @@ Type a command, then press `Enter`.
 
 ### Role commands
 - `c` or `conductor`: switch to conductor role
-- `m` or `musician`: switch to musician role
+- `u` or `musician`: switch to musician role
 
 In musician role, keyboard commands are sent as CAN control messages (for loopback testing), but are not applied directly unless received over CAN.
+
+### Network commands
+- `node <id>`: set this board's node id (`1-14`) and start discovery
+- `claim`: claim conductor role
+- `m`, `member`, or `membership`: show all boards membership status
+- `R`: reset key and tempo to defaults
+- `I`: show local node/rank/role info
+- `T`: toggle local audio mute
+- `P`: toggle periodic tempo/MUTED printing
 
 ### Settings commands
 - `t` or `tempo`: enter tempo-setting mode (valid range `60-240` BPM)
@@ -80,8 +89,9 @@ After `tempo`, `key`, or `volume`:
 - Type a number and press `Enter` to apply
 - Type `e` to cancel and return to main control mode
 
-Input normalization and limits:
-- Commands are case-insensitive
+Input behavior and limits:
+- Commands are case-sensitive
+- Uppercase commands such as `P`, `R`, `I`, and `T` are distinct from lowercase commands like `p`, `r`, `i`, and `t`
 - `tempo` values are clamped to `60-240`
 - `key` values are clamped to `-5..5`
 
