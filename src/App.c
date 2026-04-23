@@ -59,6 +59,7 @@ const int MIN_SHIFT = -10;
 #define TOKEN_NO_FAILED_NODE 0
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
+#define HEARTBEAT_LOG_SUMMARY_EVERY 20
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
@@ -72,6 +73,11 @@ extern Serial sci0;
 static int output_muted = 0;
 static int volume_before_output_mute = DEFAULT_VOLUME;
 static int can_print_enabled = 0;
+static int can_heartbeat_print_enabled = 0;
+static int suppressed_heartbeat_tx_count = 0;
+static int suppressed_heartbeat_rx_count = 0;
+static int last_suppressed_heartbeat_tx_node = -1;
+static int last_suppressed_heartbeat_rx_node = -1;
 static unsigned int rand_state = 12345u;
 
 // internal helper function
@@ -81,6 +87,8 @@ static void print_hex_fixed(unsigned int value, int digits);
 static void print_dec_hex_field(char *label, unsigned int value, int hex_digits);
 static void print_can_buffer(CANMsg *msg);
 static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg);
+static void print_can_msg_filtered(const char *prefix, CANMsg *msg, int is_tx);
+static void print_can_heartbeat_summary(void);
 static void cancel_pending_msg(Msg *slot);
 static void tone_schedule_next(ToneTask *self, int state);
 static void enter_silent_failure(App *self, int mode);
@@ -123,6 +131,11 @@ static void reset_program_state(void)
   output_muted = 0;
   volume_before_output_mute = DEFAULT_VOLUME;
   can_print_enabled = 0;
+  can_heartbeat_print_enabled = 0;
+  suppressed_heartbeat_tx_count = 0;
+  suppressed_heartbeat_rx_count = 0;
+  last_suppressed_heartbeat_tx_node = -1;
+  last_suppressed_heartbeat_rx_node = -1;
   rand_state = 12345u;
 }
 
@@ -311,7 +324,7 @@ static int can_send_raw(App *self, int msgId, int nodeId, uchar *data, int len)
 
   int status = CAN_SEND(&can0, &msg);
   if (can_print_enabled && status == 0)
-    print_can_msg_with_prefix("Sent", &msg);
+    print_can_msg_filtered("Sent", &msg, 1);
 #if ENABLE_PROBLEM_3
   handle_can_send_result(self, status);
 #endif
@@ -506,9 +519,80 @@ static void print_can_msg_with_prefix(const char *prefix, CANMsg *msg)
   SCI_WRITE(&sci0, "\n");
 }
 
+static void reset_can_heartbeat_summary(void)
+{
+  suppressed_heartbeat_tx_count = 0;
+  suppressed_heartbeat_rx_count = 0;
+  last_suppressed_heartbeat_tx_node = -1;
+  last_suppressed_heartbeat_rx_node = -1;
+}
+
+static void print_can_heartbeat_summary(void)
+{
+  char tmp[12];
+  int total = suppressed_heartbeat_tx_count + suppressed_heartbeat_rx_count;
+  if (total <= 0) return;
+
+  SCI_WRITE(&sci0, "\nHeartbeat summary: suppressed ");
+  int_to_string(total, tmp);
+  SCI_WRITE(&sci0, tmp);
+  SCI_WRITE(&sci0, " messages");
+
+  if (suppressed_heartbeat_tx_count > 0)
+  {
+    SCI_WRITE(&sci0, ", TX=");
+    int_to_string(suppressed_heartbeat_tx_count, tmp);
+    SCI_WRITE(&sci0, tmp);
+    SCI_WRITE(&sci0, " lastTxNode=");
+    int_to_string(last_suppressed_heartbeat_tx_node, tmp);
+    SCI_WRITE(&sci0, tmp);
+  }
+
+  if (suppressed_heartbeat_rx_count > 0)
+  {
+    SCI_WRITE(&sci0, ", RX=");
+    int_to_string(suppressed_heartbeat_rx_count, tmp);
+    SCI_WRITE(&sci0, tmp);
+    SCI_WRITE(&sci0, " lastRxNode=");
+    int_to_string(last_suppressed_heartbeat_rx_node, tmp);
+    SCI_WRITE(&sci0, tmp);
+  }
+
+  SCI_WRITE(&sci0, "\n");
+  reset_can_heartbeat_summary();
+}
+
+static void record_suppressed_heartbeat(CANMsg *msg, int is_tx)
+{
+  if (is_tx)
+  {
+    suppressed_heartbeat_tx_count++;
+    last_suppressed_heartbeat_tx_node = msg->nodeId;
+  }
+  else
+  {
+    suppressed_heartbeat_rx_count++;
+    last_suppressed_heartbeat_rx_node = msg->nodeId;
+  }
+
+  if (suppressed_heartbeat_tx_count + suppressed_heartbeat_rx_count >= HEARTBEAT_LOG_SUMMARY_EVERY)
+    print_can_heartbeat_summary();
+}
+
+static void print_can_msg_filtered(const char *prefix, CANMsg *msg, int is_tx)
+{
+  if (msg->msgId == CAN_MSG_HEARTBEAT && !can_heartbeat_print_enabled)
+  {
+    record_suppressed_heartbeat(msg, is_tx);
+    return;
+  }
+
+  print_can_msg_with_prefix(prefix, msg);
+}
+
 static void print_can_msg(CANMsg *msg)
 {
-  print_can_msg_with_prefix("Received", msg);
+  print_can_msg_filtered("Received", msg, 0);
 }
 
 // forward declarations
@@ -815,12 +899,8 @@ void send_note_hb(App *self, int session)
 void send_cond_hb(App *self, int session)
 {
 #if ENABLE_PROBLEM_4
-  if (session != self->cond_hb_session) return;
-  if (self->is_silent) return;
-  if (self->role != CONDUCTOR_ROLE) return;
-  if (self->active_count > 1 || self->pending_join_count > 0)
-    send_heartbeat_now(self);
-  SEND(MSEC(100), MSEC(5), self, send_cond_hb, session);
+  (void)self;
+  (void)session;
 #else
   (void)self;
   (void)session;
@@ -1045,9 +1125,8 @@ static void become_conductor(App *self, int reason)
   self->role = CONDUCTOR_ROLE;
   self->conductor_id = self->node_id;
 #if ENABLE_PROBLEM_4
-  // start idle conductor heartbeat
+  // Heartbeats are only sent by send_note_hb() while this node is playing a note.
   self->cond_hb_session++;
-  SEND(MSEC(100), MSEC(5), self, send_cond_hb, self->cond_hb_session);
 #endif
   // cancel musician watchdog
   self->watchdog_session++;
@@ -1359,7 +1438,7 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  t/tempo 60-240, k/key -5..5, v/volume 0-20\n");
   SCI_WRITE(&sci0, "  node <id> 1-14, claim, R reset key+tempo\n");
   SCI_WRITE(&sci0, "  m/member, I info, T audio mute\n");
-  SCI_WRITE(&sci0, "  P periodic print, L/canlog\n");
+  SCI_WRITE(&sci0, "  P periodic print, L/canlog, H/canloghb\n");
 #if ENABLE_PROBLEM_3
   SCI_WRITE(&sci0, "  f1 silent, f2 recover 5-10s, f3 CAN off, z leave silent\n");
 #else
@@ -1454,9 +1533,33 @@ void command_handler(App *self, char c)
       self->buffer_pos = 0;
       can_print_enabled = !can_print_enabled;
       if (can_print_enabled)
-        SCI_WRITE(&sci0, "\nCAN RX/TX message printing enabled.\n");
+      {
+        if (can_heartbeat_print_enabled)
+          SCI_WRITE(&sci0, "\nCAN RX/TX message printing enabled (including heartbeat details).\n");
+        else
+          SCI_WRITE(&sci0, "\nCAN RX/TX message printing enabled (heartbeats summarized; use H for details).\n");
+      }
       else
+      {
+        print_can_heartbeat_summary();
         SCI_WRITE(&sci0, "\nCAN RX/TX message printing disabled.\n");
+      }
+      return;
+    }
+
+    if (strcmp(self->buffer, "H") == 0 || strcmp(self->buffer, "canloghb") == 0)
+    {
+      self->buffer_pos = 0;
+      can_heartbeat_print_enabled = !can_heartbeat_print_enabled;
+      if (can_heartbeat_print_enabled)
+      {
+        print_can_heartbeat_summary();
+        SCI_WRITE(&sci0, "\nCAN heartbeat detail enabled (effective while canlog is on).\n");
+      }
+      else
+      {
+        SCI_WRITE(&sci0, "\nCAN heartbeat detail disabled; heartbeats will be summarized.\n");
+      }
       return;
     }
 
