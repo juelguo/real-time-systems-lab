@@ -5,56 +5,34 @@
 #include "canTinyTimber.h"
 #include "sciTinyTimber.h"
 
-#define MIN_VOLUME 0
-#define MAX_VOLUME 20
-#define MIN_TEMPO 60
-#define MAX_TEMPO 240
-#define MIN_KEY -5
-#define MAX_KEY 5
-#define DEFAULT_VOLUME 8
+#define BURST_BUF_SIZE 10
 
-// for media player
 typedef enum
 {
   CONTROL_MODE = 0,
-  VOLUME_MODE = 1,
-  KEY_MODE = 2,
-  TEMPO_MODE = 3
+  DELTA_SELECT_MODE = 1,
 } Mode;
-
-typedef enum
-{
-  CONDUCTOR_ROLE = 0,
-  MUSICIAN_ROLE = 1
-} Role;
-
-typedef enum
-{
-  CAN_CMD_PLAY = 1,
-  CAN_CMD_STOP = 2,
-  CAN_CMD_SET_TEMPO = 3,
-  CAN_CMD_SET_KEY = 4,
-  CAN_CMD_SET_VOLUME = 5,
-  CAN_CMD_MUTE_OUTPUT = 6,
-  CAN_CMD_UNMUTE_OUTPUT = 7
-} CanCommand;
 
 typedef struct
 {
   Object super;
-  char buffer[32]; // receive command
-  int buffer_pos;  // pointer to buffer position
+  char buffer[32];
+  int buffer_pos;
   int mode;
-  int role;
-  int current_index; // current tone index to play
-  int key;           // shifted key
-  int tempo;         // length to play
-  int mute;          // indicate mute or not
-  int status;        // indicate if the tone generator is already running
-  int play_session;  // monotonic playback session id
+  /* regulator state */
+  Timer startup_timer;      /* reset at startApp; T_SAMPLE gives absolute time */
+  Time  last_delivery_time; /* absolute timestamp of previous scheduled delivery */
+  int   delta_sec;
+  int   seq_tx;
+  int   burst_mode;
+  /* circular buffer — stores sequence numbers only (avoids CANMsg alignment) */
+  int reg_buf[BURST_BUF_SIZE];
+  int reg_head;
+  int reg_tail;
+  int reg_count;
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, CONDUCTOR_ROLE, 0, 0, 120, 1, 0, 0}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, initTimer(), 0, 1, 0, 0, {}, 0, 0, 0}
 
 void reader(App *, int);
 void receiver(App *, int);
@@ -63,19 +41,9 @@ void command_handler(App *, char);
 void parameter_control_handler(App *, char);
 void print_helper(App *);
 
-void play_note(App *, int);
-void stop_note(App *, int);
-void apply_play(App *);
-void apply_stop(App *);
-int apply_tempo(App *, int);
-int apply_key(App *, int);
-int apply_volume(int);
-void apply_output_mute(void);
-void apply_output_unmute(void);
-void send_can_player_command(App *, CanCommand, int);
-void print_can_command_name(uchar);
-int decode_command_value(uchar, uchar);
-void print_can_message(char *, CANMsg *);
+void send_one_message(App *, int);
+void burst_tick(App *, int);
+void deliver_message(App *, int);
 
 typedef struct
 {

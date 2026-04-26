@@ -1,117 +1,69 @@
-/* Encodes, logs, and applies CAN-based player commands. */
+/* CAN message regulator: sender and regulated receiver/delivery. */
 
 #include "App.h"
 #include "TinyTimber.h"
 
-#define CAN_MSG_PLAYER_CONTROL 1
-#define CAN_NODE_BROADCAST 0x0F
+void int_to_string(int, char *);
 
-void print_can_command_name(uchar command)
+/* Send one CAN message with the current sequence number. */
+void send_one_message(App *self, int unused)
 {
-  if (command == CAN_CMD_PLAY)
-  {
-    SCI_WRITE(&sci0, "PLAY");
-    return;
-  }
-  if (command == CAN_CMD_STOP)
-  {
-    SCI_WRITE(&sci0, "STOP");
-    return;
-  }
-  if (command == CAN_CMD_SET_TEMPO)
-  {
-    SCI_WRITE(&sci0, "SET_TEMPO");
-    return;
-  }
-  if (command == CAN_CMD_SET_KEY)
-  {
-    SCI_WRITE(&sci0, "SET_KEY");
-    return;
-  }
-  if (command == CAN_CMD_SET_VOLUME)
-  {
-    SCI_WRITE(&sci0, "SET_VOLUME");
-    return;
-  }
-  if (command == CAN_CMD_MUTE_OUTPUT)
-  {
-    SCI_WRITE(&sci0, "MUTE_OUTPUT");
-    return;
-  }
-  if (command == CAN_CMD_UNMUTE_OUTPUT)
-  {
-    SCI_WRITE(&sci0, "UNMUTE_OUTPUT");
-    return;
-  }
-  SCI_WRITE(&sci0, "UNKNOWN");
-}
-
-void send_can_player_command(App *self, CanCommand command, int value)
-{
-  if (self->role != CONDUCTOR_ROLE && self->role != MUSICIAN_ROLE)
-  {
-    return;
-  }
-
-  /* Pack command + value into the shared player-control frame format. */
+  (void)unused;
   CANMsg msg;
-  msg.msgId = CAN_MSG_PLAYER_CONTROL;
-  msg.nodeId = CAN_NODE_BROADCAST;
-  msg.length = 2;
-  msg.buff[0] = (uchar)command;
-  msg.buff[1] = (uchar)value;
-  // print_can_message("TX", &msg);
+  msg.msgId  = self->seq_tx;
+  msg.nodeId = 0;
+  msg.length = 1;
+  msg.buff[0] = 0;
+
+  char buf[8];
+  SCI_WRITE(&sci0, "\nTX seq=");
+  int_to_string(self->seq_tx, buf);
+  SCI_WRITE(&sci0, buf);
+  SCI_WRITE(&sci0, "\n");
+
+  self->seq_tx = (self->seq_tx + 1) & 0x7F;
   CAN_SEND(&can0, &msg);
 }
 
-int decode_command_value(uchar command, uchar raw)
+/* Periodic burst sender: fires every 500 ms while burst_mode is active. */
+void burst_tick(App *self, int unused)
 {
-  if (command == CAN_CMD_SET_KEY)
+  (void)unused;
+  send_one_message(self, 0);
+  if (self->burst_mode)
   {
-    return (int)((int8_t)raw);
+    AFTER(MSEC(500), self, burst_tick, 0);
   }
-  return (int)raw;
 }
 
-void print_can_message(char *direction, CANMsg *msg)
+/* Deliver one buffered message to the application. */
+void deliver_message(App *self, int unused)
 {
-  char value[16];
-
-  SCI_WRITE(&sci0, "\nCAN ");
-  SCI_WRITE(&sci0, direction);
-  SCI_WRITE(&sci0, " -> msgId=");
-  int_to_string(msg->msgId, value);
-  SCI_WRITE(&sci0, value);
-
-  SCI_WRITE(&sci0, ", nodeId=");
-  int_to_string(msg->nodeId, value);
-  SCI_WRITE(&sci0, value);
-
-  SCI_WRITE(&sci0, ", len=");
-  int_to_string(msg->length, value);
-  SCI_WRITE(&sci0, value);
-
-  if (msg->length > 0)
+  (void)unused;
+  if (self->reg_count <= 0)
   {
-    SCI_WRITE(&sci0, ", cmd=");
-    print_can_command_name(msg->buff[0]);
-    SCI_WRITE(&sci0, "(");
-    int_to_string(msg->buff[0], value);
-    SCI_WRITE(&sci0, value);
-    SCI_WRITE(&sci0, ")");
+    return;
   }
 
-  if (msg->length > 1)
-  {
-    SCI_WRITE(&sci0, ", value=");
-    int_to_string(decode_command_value(msg->buff[0], msg->buff[1]), value);
-    SCI_WRITE(&sci0, value);
-  }
+  int seq = self->reg_buf[self->reg_head];
+  self->reg_head = (self->reg_head + 1) % BURST_BUF_SIZE;
+  self->reg_count--;
 
-  SCI_WRITE(&sci0, "\n");
+  Time now = T_SAMPLE(&self->startup_timer);
+  char buf[12];
+  SCI_WRITE(&sci0, "\nDELIVERED seq=");
+  int_to_string(seq, buf);
+  SCI_WRITE(&sci0, buf);
+  SCI_WRITE(&sci0, " at T=");
+  int_to_string(SEC_OF(now), buf);
+  SCI_WRITE(&sci0, buf);
+  SCI_WRITE(&sci0, "s ");
+  int_to_string(MSEC_OF(now), buf);
+  SCI_WRITE(&sci0, buf);
+  SCI_WRITE(&sci0, "ms\n");
 }
 
-// this function is for can message receiver
+/* CAN interrupt handler — implements the regulator logic. */
 void receiver(App *self, int unused)
 {
   (void)unused;
@@ -121,61 +73,38 @@ void receiver(App *self, int unused)
     return;
   }
 
-  print_can_message("RX", &msg);
+  /* t_in: absolute arrival time since startup (via T_SAMPLE on startup_timer).
+     CURRENT_OFFSET() is merely execution jitter, NOT wall-clock time. */
+  Time t_in = T_SAMPLE(&self->startup_timer);
 
-  if (self->role != MUSICIAN_ROLE)
+  if (self->reg_count >= BURST_BUF_SIZE)
   {
-    /* Only musician boards follow incoming control traffic. */
+    SCI_WRITE(&sci0, "\nWARN: buffer full, message dropped\n");
     return;
   }
 
-  if (msg.msgId != CAN_MSG_PLAYER_CONTROL || msg.length < 1)
+  /* Enqueue sequence number */
+  self->reg_buf[self->reg_tail] = (int)msg.msgId;
+  self->reg_tail = (self->reg_tail + 1) % BURST_BUF_SIZE;
+  self->reg_count++;
+
+  /* Compute regulated delivery time (absolute) */
+  Time delta = SEC(self->delta_sec);
+  Time t_deliver = self->last_delivery_time + delta;
+  if (t_in > t_deliver)
   {
-    return;
+    t_deliver = t_in;
   }
 
-  /* Key is signed; the remaining settings are encoded as unsigned bytes. */
-  int signed_value = (msg.length > 1) ? (int)((int8_t)msg.buff[1]) : 0;
-  int unsigned_value = (msg.length > 1) ? (int)msg.buff[1] : 0;
+  /* Record scheduled delivery time now (not at callback) for correct spacing */
+  self->last_delivery_time = t_deliver;
 
-  if (msg.buff[0] == CAN_CMD_PLAY)
+  /* delay is relative to current message baseline; AFTER adds it to that baseline */
+  Time delay = t_deliver - t_in;
+  if (delay < 0)
   {
-    apply_play(self);
-    return;
+    delay = 0;
   }
 
-  if (msg.buff[0] == CAN_CMD_STOP)
-  {
-    apply_stop(self);
-    return;
-  }
-
-  if (msg.buff[0] == CAN_CMD_SET_TEMPO)
-  {
-    apply_tempo(self, unsigned_value);
-    return;
-  }
-
-  if (msg.buff[0] == CAN_CMD_SET_KEY)
-  {
-    apply_key(self, signed_value);
-    return;
-  }
-
-  if (msg.buff[0] == CAN_CMD_SET_VOLUME)
-  {
-    apply_volume(unsigned_value);
-    return;
-  }
-
-  if (msg.buff[0] == CAN_CMD_MUTE_OUTPUT)
-  {
-    apply_output_mute();
-    return;
-  }
-
-  if (msg.buff[0] == CAN_CMD_UNMUTE_OUTPUT)
-  {
-    apply_output_unmute();
-  }
+  AFTER(delay, self, deliver_message, 0);
 }
