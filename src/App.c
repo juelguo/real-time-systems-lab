@@ -60,6 +60,8 @@ const int MIN_SHIFT = -10;
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
 #define HEARTBEAT_LOG_SUMMARY_EVERY 100
+#define WATCHDOG_BASE_MS 400
+#define WATCHDOG_STAGGER_MS 200
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
@@ -93,6 +95,9 @@ static void print_node_event(App *self, char *event, int node_id);
 static void cancel_pending_msg(Msg *slot);
 static void tone_schedule_next(ToneTask *self, int state);
 static void enter_silent_failure(App *self, int mode);
+#if ENABLE_PROBLEM_3
+static void reset_watchdog(App *self);
+#endif
 
 static void cancel_pending_msg(Msg *slot)
 {
@@ -336,6 +341,7 @@ static void handle_can_send_result(App *self, int status)
   self->can_err_count++;
   if (self->can_err_count < F3_FAIL_THRESHOLD) return;
   self->can_err_count = 0;
+  CAN_INIT(&can0);
 
   // if only have two board, the condutor should not stop if the connection is lost
   if (self->role == CONDUCTOR_ROLE && self->active_count <= 2)
@@ -480,7 +486,8 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
   uchar d[2];
   d[0] = (uchar)token_index;
   d[1] = (uchar)token_failed;
-  can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 2);
+  if (can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 2) != 0 || self->is_silent)
+    return;
 
   if (self->active_count > 0 &&
       self->rank >= 0 &&
@@ -490,6 +497,14 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
     self->last_token_node = self->node_id;
     play_one_note(self, token_index);
   }
+#if ENABLE_PROBLEM_3
+  else if (self->active_count > 0 && self->rank >= 0)
+  {
+    self->last_token_index = token_index;
+    self->last_token_node = self->node_id;
+    reset_watchdog(self);
+  }
+#endif
 }
 
 static void send_token(App *self, int next_note_index)
@@ -887,6 +902,7 @@ static void stop_local_playback(App *self)
 #if ENABLE_PROBLEM_3
   self->note_hb_session++;
   self->watchdog_session++;
+  self->watchdog_expected_node = -1;
   cancel_pending_msg(&self->watchdog_msg);
 #endif
 
@@ -1007,6 +1023,10 @@ void send_cond_hb(App *self, int session)
   if (self->role != CONDUCTOR_ROLE) return;
   if (is_valid_node_id(self->node_id))
     send_heartbeat_now(self);
+#if ENABLE_PROBLEM_3
+  if (self->active_count <= 1 && self->known_count > self->active_count)
+    send_discovery_ping(self);
+#endif
   SEND(MSEC(100), MSEC(2), self, send_cond_hb, session);
 #else
   (void)self;
@@ -1021,9 +1041,11 @@ void watchdog_fire(App *self, int session)
   self->watchdog_msg = NULL;
   if (self->is_silent || self->active_count <= 0) return;
 
-  int failed_rank = self->last_token_index % self->active_count;
-  int failed_node = self->active_nodes[failed_rank];
+  int failed_node = self->watchdog_expected_node;
+  self->watchdog_expected_node = -1;
+  if (!is_valid_node_id(failed_node)) return;
   if (failed_node == self->node_id) return;
+  if (!arr_contains(self->active_nodes, self->active_count, failed_node)) return;
 
   mark_node_failed(self, failed_node);
 
@@ -1082,12 +1104,43 @@ void conductor_wd_fire(App *self, int session)
 }
 
 #if ENABLE_PROBLEM_3
+static int token_expected_node(App *self)
+{
+  if (self->active_count <= 0) return -1;
+  int expected_rank = self->last_token_index % self->active_count;
+  if (expected_rank < 0) expected_rank += self->active_count;
+  return self->active_nodes[expected_rank];
+}
+
+static int watchdog_backup_order(App *self, int expected_node)
+{
+  int order = 0;
+  for (int i = 0; i < self->active_count; i++)
+  {
+    int nid = self->active_nodes[i];
+    if (nid == expected_node) continue;
+    if (nid == self->node_id) return order;
+    order++;
+  }
+  return -1;
+}
+
 static void reset_watchdog(App *self)
 {
-  if (self->is_silent || self->rank < 0) return;
   int session = ++self->watchdog_session;
-  int delay = 200 + self->rank * 200;
   cancel_pending_msg(&self->watchdog_msg);
+  self->watchdog_expected_node = -1;
+
+  if (self->is_silent || self->rank < 0 || self->active_count <= 1) return;
+
+  int expected_node = token_expected_node(self);
+  if (!is_valid_node_id(expected_node) || expected_node == self->node_id) return;
+
+  int backup_order = watchdog_backup_order(self, expected_node);
+  if (backup_order < 0) return;
+
+  self->watchdog_expected_node = expected_node;
+  int delay = WATCHDOG_BASE_MS + backup_order * WATCHDOG_STAGGER_MS;
   self->watchdog_msg = SEND(MSEC(delay), MSEC(10), self, watchdog_fire, session);
 }
 #endif
@@ -1165,8 +1218,11 @@ static void enter_silent_failure(App *self, int mode)
   self->watchdog_session++;
   self->cond_wd_session++;
   self->pending_failed_node = -1;
+  self->watchdog_expected_node = -1;
   cancel_pending_msg(&self->watchdog_msg);
   cancel_pending_msg(&self->cond_wd_msg);
+  if (mode == SILENT_F3)
+    CAN_INIT(&can0);
   self->play_session++;
   self->song_active = 0;
   self->status = 0;
@@ -1200,10 +1256,13 @@ static void leave_silent_failure(App *self)
 {
 #if ENABLE_PROBLEM_3
   if (!self->is_silent) return;
+  int was_f3 = (self->silent_mode == SILENT_F3);
   self->is_silent = 0;
   self->can_err_count = 0;
   self->silent_session++;
   self->pending_failed_node = -1;
+  if (was_f3)
+    CAN_INIT(&can0);
   SCI_WRITE(&sci0, "\nLeave Silent Failure\n");
   // if we were conductor, rejoin as musician (P4 requirement)
   if (self->was_conductor)
