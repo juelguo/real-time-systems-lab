@@ -48,6 +48,7 @@ const int MIN_SHIFT = -10;
 #define CAN_MSG_CONDUCTOR_ANNOUNCE 4
 #define CAN_MSG_TOKEN              5
 #define CAN_MSG_HEARTBEAT          6
+#define CAN_MSG_ANNOUNCE_NODE_FAILURE 7
 #define CAN_SUB_START  1
 #define CAN_SUB_STOP   2
 #define CAN_SUB_KEY    3
@@ -56,7 +57,6 @@ const int MIN_SHIFT = -10;
 #define CAN_SUB_SET_TEMPO CAN_SUB_TEMPO
 #define CAN_NODE_BROADCAST 0x0F
 #define MELODY_NOTE_COUNT 32
-#define TOKEN_NO_FAILED_NODE 0
 #define F3_FAIL_THRESHOLD 3
 #define PRINT_INTERVAL_S 10
 #define HEARTBEAT_LOG_SUMMARY_EVERY 100
@@ -65,7 +65,7 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 0
+#define ENABLE_PROBLEM_4 1
 
 extern App app;
 extern ToneTask tone_task;
@@ -95,7 +95,9 @@ static void print_node_event(App *self, char *event, int node_id);
 static void cancel_pending_msg(Msg *slot);
 static void tone_schedule_next(ToneTask *self, int state);
 static void enter_silent_failure(App *self, int mode);
+static void send_node_failure_announce(App *self, int failed_node);
 #if ENABLE_PROBLEM_3
+static int token_expected_node(App *self);
 static void reset_watchdog(App *self);
 #endif
 
@@ -325,6 +327,19 @@ static void mark_node_failed(App *self, int failed_node)
   if (was_active || was_pending || !was_known)
     print_node_event(self, "NODE_FAILED", failed_node);
 }
+
+static void report_node_failed(App *self, int failed_node)
+{
+  if (!is_valid_node_id(failed_node)) return;
+  int should_announce =
+      arr_contains(self->active_nodes, self->active_count, failed_node) ||
+      arr_contains(self->pending_join_nodes, self->pending_join_count, failed_node) ||
+      !arr_contains(self->known_nodes, self->known_count, failed_node);
+
+  mark_node_failed(self, failed_node);
+  if (should_announce)
+    send_node_failure_announce(self, failed_node);
+}
 #endif
 
 #if ENABLE_PROBLEM_3
@@ -350,7 +365,7 @@ static void handle_can_send_result(App *self, int status)
     {
       int nid = self->active_nodes[i];
       if (nid != self->node_id)
-        mark_node_failed(self, nid);
+        report_node_failed(self, nid);
     }
     if (!arr_contains(self->active_nodes, self->active_count, self->node_id))
       add_active_node(self, self->node_id);
@@ -461,17 +476,24 @@ static void send_conductor_announce(App *self)
   can_send_raw(self, CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1 + count);
 }
 
-static void send_token_with_failure(App *self, int next_note_index, int failed_node)
+static void send_node_failure_announce(App *self, int failed_node)
+{
+  if (self->is_silent) return;
+  if (!is_valid_node_id(failed_node)) return;
+
+  uchar d[1];
+  d[0] = (uchar)failed_node;
+  can_send_raw(self, CAN_MSG_ANNOUNCE_NODE_FAILURE, self->node_id, d, 1);
+}
+
+static void send_token(App *self, int next_note_index)
 {
   if (self->is_silent) return;
 
   int token_index = next_note_index % MELODY_NOTE_COUNT;
   if (token_index < 0) token_index += MELODY_NOTE_COUNT;
-  int token_failed = is_valid_node_id(failed_node) ? failed_node : TOKEN_NO_FAILED_NODE;
 
 #if ENABLE_PROBLEM_3
-  if (is_valid_node_id(token_failed))
-    mark_node_failed(self, token_failed);
   apply_pending_joins(self);
 #endif
 
@@ -483,10 +505,9 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
     return;
   }
 
-  uchar d[2];
+  uchar d[1];
   d[0] = (uchar)token_index;
-  d[1] = (uchar)token_failed;
-  if (can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 2) != 0 || self->is_silent)
+  if (can_send_raw(self, CAN_MSG_TOKEN, self->node_id, d, 1) != 0 || self->is_silent)
     return;
 
   if (self->active_count > 0 &&
@@ -505,11 +526,6 @@ static void send_token_with_failure(App *self, int next_note_index, int failed_n
     reset_watchdog(self);
   }
 #endif
-}
-
-static void send_token(App *self, int next_note_index)
-{
-  send_token_with_failure(self, next_note_index, TOKEN_NO_FAILED_NODE);
 }
 
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
@@ -563,6 +579,7 @@ static char *can_msg_name(int msgId)
   if (msgId == CAN_MSG_CONDUCTOR_ANNOUNCE) return "CONDUCTOR_ANNOUNCE";
   if (msgId == CAN_MSG_TOKEN) return "TOKEN";
   if (msgId == CAN_MSG_HEARTBEAT) return "HEARTBEAT";
+  if (msgId == CAN_MSG_ANNOUNCE_NODE_FAILURE) return "ANNOUNCE_NODE_FAILURE";
   return "UNKNOWN";
 }
 
@@ -896,7 +913,6 @@ static void stop_local_playback(App *self)
   self->song_active = 0;
   self->mute = 1;
   self->status = 0;
-  self->pending_failed_node = -1;
   self->start_after_discovery = 0;
 
 #if ENABLE_PROBLEM_3
@@ -988,17 +1004,14 @@ void finish_note(App *self, int session)
   self->status = 0;
   if (!self->song_active)
   {
-    self->pending_failed_node = -1;
     return;
   }
 
   int next_abs = (self->last_token_index + 1) % MELODY_NOTE_COUNT;
-  int failed_node = self->pending_failed_node;
-  self->pending_failed_node = -1;
   self->last_token_index = next_abs;
 
   // send next token to all
-  send_token_with_failure(self, next_abs, failed_node);
+  send_token(self, next_abs);
 }
 
 void send_note_hb(App *self, int session)
@@ -1047,20 +1060,16 @@ void watchdog_fire(App *self, int session)
   if (failed_node == self->node_id) return;
   if (!arr_contains(self->active_nodes, self->active_count, failed_node)) return;
 
-  mark_node_failed(self, failed_node);
+  report_node_failed(self, failed_node);
 
   if (self->active_count > 0 &&
       self->rank >= 0 &&
       (self->last_token_index % self->active_count) == self->rank)
   {
-    if (self->pending_failed_node < 0)
-      self->pending_failed_node = failed_node;
     play_one_note(self, self->last_token_index);
   }
   else if (self->active_count > 0 && self->rank >= 0)
   {
-    if (self->pending_failed_node < 0)
-      self->pending_failed_node = failed_node;
     reset_watchdog(self);
   }
 #else
@@ -1079,7 +1088,7 @@ void conductor_wd_fire(App *self, int session)
 
   int failed_conductor = self->conductor_id;
   self->conductor_id = -1;
-  mark_node_failed(self, failed_conductor);
+  report_node_failed(self, failed_conductor);
 
   if (!arr_contains(self->active_nodes, self->active_count, self->node_id))
     add_active_node(self, self->node_id);
@@ -1217,7 +1226,6 @@ static void enter_silent_failure(App *self, int mode)
   self->cond_hb_session++;
   self->watchdog_session++;
   self->cond_wd_session++;
-  self->pending_failed_node = -1;
   self->watchdog_expected_node = -1;
   cancel_pending_msg(&self->watchdog_msg);
   cancel_pending_msg(&self->cond_wd_msg);
@@ -1260,7 +1268,6 @@ static void leave_silent_failure(App *self)
   self->is_silent = 0;
   self->can_err_count = 0;
   self->silent_session++;
-  self->pending_failed_node = -1;
   if (was_f3)
     CAN_INIT(&can0);
   SCI_WRITE(&sci0, "\nLeave Silent Failure\n");
@@ -1472,11 +1479,6 @@ static void handle_token(App *self, CANMsg *msg)
     }
   }
   int idx = (int)msg->buff[0];
-  int failed_node = -1;
-#if ENABLE_PROBLEM_3
-  if (msg->length >= 2 && is_valid_node_id((int)msg->buff[1]))
-    failed_node = (int)msg->buff[1];
-#endif
   if (!self->song_active)
   {
     if (idx != 0)
@@ -1490,8 +1492,6 @@ static void handle_token(App *self, CANMsg *msg)
   self->last_token_index = idx;
   self->last_token_node = msg->nodeId;
 #if ENABLE_PROBLEM_3
-  if (failed_node >= 0)
-    mark_node_failed(self, failed_node);
   apply_pending_joins(self);
   // reset our watchdog
   reset_watchdog(self);
@@ -1504,6 +1504,43 @@ static void handle_token(App *self, CANMsg *msg)
   if (!self->is_silent && self->active_count > 0 && (idx % self->active_count) == self->rank)
     play_one_note(self, idx);
 }
+
+#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+static void handle_node_failure_announce(App *self, CANMsg *msg)
+{
+  if (msg->length < 1) return;
+
+  int failed_node = (int)msg->buff[0];
+  if (!is_valid_node_id(failed_node)) return;
+
+  if (is_valid_node_id(msg->nodeId))
+    add_known_node(self, msg->nodeId);
+
+#if ENABLE_PROBLEM_3
+  int failed_expected_node = 0;
+  if (self->song_active && self->active_count > 0)
+    failed_expected_node = (failed_node == token_expected_node(self));
+#endif
+
+  mark_node_failed(self, failed_node);
+
+#if ENABLE_PROBLEM_3
+  if (self->song_active)
+  {
+    reset_watchdog(self);
+    if (failed_expected_node &&
+        !self->is_silent &&
+        self->status == 0 &&
+        self->active_count > 0 &&
+        self->rank >= 0 &&
+        (self->last_token_index % self->active_count) == self->rank)
+    {
+      play_one_note(self, self->last_token_index);
+    }
+  }
+#endif
+}
+#endif
 
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
 static void handle_heartbeat(App *self, CANMsg *msg)
@@ -1588,6 +1625,8 @@ void receiver(App *self, int unused)
   else if (msg.msgId == CAN_MSG_TOKEN)
     handle_token(self, &msg);
 #if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+  else if (msg.msgId == CAN_MSG_ANNOUNCE_NODE_FAILURE)
+    handle_node_failure_announce(self, &msg);
   else if (msg.msgId == CAN_MSG_HEARTBEAT)
     handle_heartbeat(self, &msg);
 #endif
