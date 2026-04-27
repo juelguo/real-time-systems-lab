@@ -65,7 +65,7 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 1
+#define ENABLE_PROBLEM_4 0
 
 extern App app;
 extern ToneTask tone_task;
@@ -981,7 +981,7 @@ void send_note_hb(App *self, int session)
 
 void send_cond_hb(App *self, int session)
 {
-#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+#if ENABLE_PROBLEM_4
   if (session != self->cond_hb_session) return;
   if (self->is_silent) return;
   if (self->role != CONDUCTOR_ROLE) return;
@@ -1260,7 +1260,7 @@ static void become_conductor(App *self, int reason)
 {
   self->role = CONDUCTOR_ROLE;
   self->conductor_id = self->node_id;
-#if ENABLE_PROBLEM_3 || ENABLE_PROBLEM_4
+#if ENABLE_PROBLEM_4
   int hb_session = ++self->cond_hb_session;
   if (!self->is_silent && is_valid_node_id(self->node_id))
   {
