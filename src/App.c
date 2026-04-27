@@ -65,7 +65,7 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 0
+#define ENABLE_PROBLEM_4 1
 
 extern App app;
 extern ToneTask tone_task;
@@ -863,6 +863,7 @@ static void stop_local_playback(App *self)
   self->mute = 1;
   self->status = 0;
   self->start_after_discovery = 0;
+  self->rejoin_after_silent = 0;
 
 #if ENABLE_PROBLEM_3
   self->note_hb_session++;
@@ -881,6 +882,7 @@ void apply_play(App *self)
   self->play_session++;
   self->song_active = 1;
   self->status = 1;
+  self->rejoin_after_silent = 0;
   SYNC(&tone_task, tone_set_mute, 1);
   send_conductor_cmd(self, CAN_SUB_START, 0);
   self->start_after_discovery = 1;
@@ -1218,6 +1220,7 @@ static void leave_silent_failure(App *self)
   if (!self->is_silent) return;
   int was_f3 = (self->silent_mode == SILENT_F3);
   self->is_silent = 0;
+  self->silent_mode = SILENT_NONE;
   self->can_err_count = 0;
   self->silent_session++;
   if (was_f3)
@@ -1406,16 +1409,20 @@ static void handle_token(App *self, CANMsg *msg)
     }
   }
   int idx = (int)msg->buff[0];
+  int resume_from_rejoin = self->rejoin_after_silent && self->active_count > 1;
   if (!self->song_active)
   {
-    if (idx != 0)
+    if (idx != 0 && !resume_from_rejoin)
     {
       if (can_print_enabled)
         SCI_WRITE(&sci0, "\nIgnored TOKEN while stopped.\n");
       return;
     }
+    if (idx != 0 && can_print_enabled)
+      SCI_WRITE(&sci0, "\nResumed from TOKEN after silent.\n");
     self->song_active = 1;
   }
+  self->rejoin_after_silent = 0;
   self->last_token_index = idx;
   self->last_token_node = msg->nodeId;
 #if ENABLE_PROBLEM_3
@@ -1517,6 +1524,7 @@ static void handle_conductor_cmd(App *self, CANMsg *msg)
     self->play_session++;
     self->song_active = 1;
     self->status = 1;
+    self->rejoin_after_silent = 0;
     SYNC(&tone_task, tone_set_mute, 1);
   }
   else if (sub == CAN_SUB_STOP)
