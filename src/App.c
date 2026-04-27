@@ -65,7 +65,7 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 1
+#define ENABLE_PROBLEM_4 0
 
 extern App app;
 extern ToneTask tone_task;
@@ -384,52 +384,6 @@ static int lowest_active_nodeId(App *self)
   if (self->active_count == 0) return self->node_id;
   return self->active_nodes[0];
 }
-
-static void replace_active_nodes_from_announce(App *self, CANMsg *msg, int new_cond)
-{
-  int old_active_count = self->active_count;
-  int old_active_nodes[16];
-  for (int i = 0; i < old_active_count; i++)
-    old_active_nodes[i] = self->active_nodes[i];
-  int old_known_count = self->known_count;
-  int old_known_nodes[16];
-  for (int i = 0; i < old_known_count; i++)
-    old_known_nodes[i] = self->known_nodes[i];
-
-  self->active_count = 0;
-  if (is_valid_node_id(new_cond))
-    add_active_node_silent(self, new_cond);
-
-  for (int i = 1; i < msg->length; i++)
-  {
-    int nid = (int)msg->buff[i];
-    if (is_valid_node_id(nid))
-      add_active_node_silent(self, nid);
-  }
-  if (!self->is_silent)
-    add_active_node_silent(self, self->node_id);
-
-  self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
-  for (int i = 0; i < old_active_count; i++)
-  {
-    if (!arr_contains(self->active_nodes, self->active_count, old_active_nodes[i]))
-    {
-      add_known_node(self, old_active_nodes[i]);
-      print_node_event(self, "NODE_FAILED", old_active_nodes[i]);
-    }
-  }
-  for (int i = 0; i < self->active_count; i++)
-  {
-    int nid = self->active_nodes[i];
-    if (!arr_contains(old_active_nodes, old_active_count, nid))
-    {
-      if (arr_contains(old_known_nodes, old_known_count, nid))
-        print_node_event(self, "NODE_RECOVERED", nid);
-      else
-        print_node_event(self, "NODE_JOINED", nid);
-    }
-  }
-}
 #endif
 
 static int can_send_raw(App *self, int msgId, int nodeId, uchar *data, int len)
@@ -466,14 +420,9 @@ static void send_discovery_reply(App *self, int to_node)
 
 static void send_conductor_announce(App *self)
 {
-  uchar d[8];
-  int count = self->active_count;
-  if (count > 7) count = 7;
-
+  uchar d[1];
   d[0] = (uchar)self->node_id;
-  for (int i = 0; i < count; i++)
-    d[1+i] = (uchar)self->active_nodes[i];
-  can_send_raw(self, CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1 + count);
+  can_send_raw(self, CAN_MSG_CONDUCTOR_ANNOUNCE, self->node_id, d, 1);
 }
 
 static void send_node_failure_announce(App *self, int failed_node)
@@ -1193,7 +1142,10 @@ void discovery_timeout(App *self, int session)
       send_token(self, 0);
   }
 #if ENABLE_PROBLEM_4
+  // Initial startup has no default conductor. Auto-takeover is only for recovery
+  // from a previously known dead network after leaving silent failure.
   if (self->rejoin_after_silent &&
+      self->known_count > 1 &&
       self->active_count <= 1 &&
       (self->conductor_id < 0 ||
        !arr_contains(self->active_nodes, self->active_count, self->conductor_id)))
@@ -1416,40 +1368,15 @@ static void handle_conductor_announce(App *self, CANMsg *msg)
   if (!is_valid_node_id(new_cond)) return;
 
   self->conductor_id = new_cond;
-  if (msg->length > 1)
-  {
-#if ENABLE_PROBLEM_4
-    replace_active_nodes_from_announce(self, msg, new_cond);
-#else
-    add_active_node(self, new_cond);
-    for (int i = 0; i < msg->length; i++)
-    {
-      if (is_valid_node_id((int)msg->buff[i]))
-      {
-        add_active_node(self, msg->buff[i]);
-        add_known_node(self, msg->buff[i]);
-      }
-    }
+  add_active_node(self, new_cond);
+  if (!is_valid_node_id(msg->nodeId) && msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
+    add_known_node(self, msg->buff[0]);
 #if ENABLE_PROBLEM_3
-    if (!self->is_silent)
-      add_active_node(self, self->node_id);
-#else
+  if (!self->is_silent)
     add_active_node(self, self->node_id);
-#endif
-#endif
-  }
-  else
-  {
-    add_active_node(self, new_cond);
-    if (!is_valid_node_id(msg->nodeId) && msg->length >= 1 && is_valid_node_id((int)msg->buff[0]))
-      add_known_node(self, msg->buff[0]);
-#if ENABLE_PROBLEM_3
-    if (!self->is_silent)
-      add_active_node(self, self->node_id);
 #else
-    add_active_node(self, self->node_id);
+  add_active_node(self, self->node_id);
 #endif
-  }
   self->rank = arr_rank_of(self->active_nodes, self->active_count, self->node_id);
   self->discovery_done = 1;
   if (new_cond == self->node_id)
@@ -1515,6 +1442,17 @@ static void handle_node_failure_announce(App *self, CANMsg *msg)
 
   if (is_valid_node_id(msg->nodeId))
     add_known_node(self, msg->nodeId);
+
+  // A self-failure announcement is stale once we can receive it again.
+  if (failed_node == self->node_id)
+  {
+    if (!self->is_silent)
+    {
+      add_active_node(self, self->node_id);
+      send_discovery_ping(self);
+    }
+    return;
+  }
 
 #if ENABLE_PROBLEM_3
   int failed_expected_node = 0;
