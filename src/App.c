@@ -65,7 +65,7 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 1
+#define ENABLE_PROBLEM_4 0
 // Set to 1 if all groups send a dedicated conductor heartbeat.
 // Set to 0 to rely only on note heartbeats and avoid conductor false-failure detection.
 #define ENABLE_CONDUCTOR_HEARTBEAT 0
