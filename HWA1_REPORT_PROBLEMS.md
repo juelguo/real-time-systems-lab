@@ -332,9 +332,11 @@ During the integration test with the other groups, we observed some bugs in the 
 
 ### Conductor Failure Detection
 
-In our design, the conductor sends heartbeat messages periodically while it is alive. Musician boards reset a conductor watchdog when they receive a heartbeat or a valid token from the current conductor.
+Our implementation can support a dedicated conductor heartbeat, controlled by `ENABLE_CONDUCTOR_HEARTBEAT`. When enabled, musician boards can run a separate conductor watchdog.
 
-If the conductor watchdog expires, the musician assumes that the conductor has entered silent failure. The failed conductor is removed from `active_nodes`, kept in `known_nodes`, and announced with the same node-failure announcement mechanism used in Problem 3.
+In the final cross-group test this option was disabled, because the other boards treated heartbeat as note heartbeat only. If our conductor watchdog expected a heartbeat from a conductor that was not currently playing a note, it could falsely mark that conductor as failed.
+
+With dedicated conductor heartbeat disabled, the system relies on the Problem 3 note heartbeat and token watchdog behavior. If a conductor is detected as failed through the active failure handling path, it is removed from `active_nodes`, kept in `known_nodes`, and announced with the same node-failure announcement mechanism used in Problem 3.
 
 ### Automatic Election
 
@@ -370,13 +372,13 @@ If all boards enter silent failure one by one, the network becomes dead and no m
 
 The main challenge in Problem 4 was keeping all boards consistent after the conductor disappears. If different boards detect the conductor failure at slightly different times, they may temporarily have different `active_nodes` lists and therefore choose different new conductors.
 
-Another challenge was cross-group compatibility. Even though the meta-group used the same CAN message IDs, small differences in timing, failure detection, heartbeat handling, or recovery behavior could still create bugs during integration with the other groups.
+Another challenge was cross-group compatibility. Even with the same CAN message IDs, heartbeat interpretation differed between groups. Our final setup treated heartbeat only as note liveness to match the integrated system.
 
-In our own software, the election rule and watchdog timing worked when several boards ran the same implementation. The remaining difficulty was making the same behavior robust when different groups' implementations interacted on the same CAN bus.
+In our own software, the election rule and watchdog timing worked when several boards ran the same implementation. For the final cross-group test, disabling the dedicated conductor heartbeat made the system compatible with the other boards and avoided false conductor failure reports.
 
 ### Integration Result
 
-The Problem 4 integration test with the other groups exposed some bugs in the cross-group behavior. When several boards all use our own software, the conductor failure recovery works correctly. Therefore, the design above is the solution strategy used in our implementation, while the remaining issue is related to cross-group compatibility.
+The final Problem 4 integration test worked after disabling the dedicated conductor heartbeat and relying on note heartbeat behavior. The old conductor also rejoins as a musician after recovery, instead of continuing as a second conductor.
 
 ### What We Learned
 
