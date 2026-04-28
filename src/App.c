@@ -65,7 +65,13 @@ const int MIN_SHIFT = -10;
 
 // Problem 3/4 failure recovery is enabled.
 #define ENABLE_PROBLEM_3 1
-#define ENABLE_PROBLEM_4 0
+#define ENABLE_PROBLEM_4 1
+// Set to 1 if all groups send a dedicated conductor heartbeat.
+// Set to 0 to rely only on note heartbeats and avoid conductor false-failure detection.
+#define ENABLE_CONDUCTOR_HEARTBEAT 0
+// Set to 1 to monitor conductor liveness even while the melody is stopped.
+// Set to 0 to pause conductor heartbeat/watchdog while the melody is stopped.
+#define ENABLE_IDLE_CONDUCTOR_HEARTBEAT 0
 
 extern App app;
 extern ToneTask tone_task;
@@ -358,8 +364,10 @@ static void handle_can_send_result(App *self, int status)
   self->can_err_count = 0;
   CAN_INIT(&can0);
 
-  // if only have two board, the condutor should not stop if the connection is lost
-  if (self->role == CONDUCTOR_ROLE && self->active_count <= 2)
+  // If this node is already the only active board, a CAN send can fail simply
+  // because no other node ACKs the frame. Keep the solo conductor alive in that
+  // case, but do not mask a real conductor disconnect while peers are active.
+  if (self->role == CONDUCTOR_ROLE && self->active_count <= 1)
   {
     for (int i = self->active_count - 1; i >= 0; i--)
     {
@@ -482,6 +490,42 @@ static void send_heartbeat_now(App *self)
 {
   uchar d[1]; d[0] = (uchar)self->node_id;
   can_send_raw(self, CAN_MSG_HEARTBEAT, self->node_id, d, 1);
+}
+#endif
+
+#if ENABLE_PROBLEM_4
+static int conductor_heartbeat_enabled(App *self)
+{
+#if !ENABLE_CONDUCTOR_HEARTBEAT
+  (void)self;
+  return 0;
+#elif ENABLE_IDLE_CONDUCTOR_HEARTBEAT
+  (void)self;
+  return 1;
+#else
+  return self->song_active;
+#endif
+}
+
+static void start_conductor_hb(App *self)
+{
+  int hb_session = ++self->cond_hb_session;
+  if (self->is_silent) return;
+  if (self->role != CONDUCTOR_ROLE) return;
+  if (!is_valid_node_id(self->node_id)) return;
+  if (!conductor_heartbeat_enabled(self)) return;
+
+  send_heartbeat_now(self);
+  SEND(MSEC(100), MSEC(2), self, send_cond_hb, hb_session);
+}
+
+static void stop_conductor_hb(App *self)
+{
+#if !ENABLE_CONDUCTOR_HEARTBEAT || !ENABLE_IDLE_CONDUCTOR_HEARTBEAT
+  self->cond_hb_session++;
+#else
+  (void)self;
+#endif
 }
 #endif
 
@@ -874,6 +918,9 @@ static void stop_local_playback(App *self)
 
   self->cond_wd_session++;
   cancel_pending_msg(&self->cond_wd_msg);
+#if ENABLE_PROBLEM_4
+  stop_conductor_hb(self);
+#endif
   SYNC(&tone_task, tone_set_mute, 1);
 }
 
@@ -884,6 +931,9 @@ void apply_play(App *self)
   self->status = 1;
   self->rejoin_after_silent = 0;
   SYNC(&tone_task, tone_set_mute, 1);
+#if ENABLE_PROBLEM_4
+  start_conductor_hb(self);
+#endif
   send_conductor_cmd(self, CAN_SUB_START, 0);
   self->start_after_discovery = 1;
   do_discovery(self);
@@ -985,6 +1035,7 @@ void send_cond_hb(App *self, int session)
   if (session != self->cond_hb_session) return;
   if (self->is_silent) return;
   if (self->role != CONDUCTOR_ROLE) return;
+  if (!conductor_heartbeat_enabled(self)) return;
   if (is_valid_node_id(self->node_id))
     send_heartbeat_now(self);
 #if ENABLE_PROBLEM_3
@@ -1111,6 +1162,7 @@ static void reset_conductor_wd(App *self)
   if (self->is_silent) return;
   if (self->role == CONDUCTOR_ROLE) return;
   if (!is_valid_node_id(self->conductor_id)) return;
+  if (!conductor_heartbeat_enabled(self)) return;
   if (!arr_contains(self->active_nodes, self->active_count, self->node_id)) return;
   if (!arr_contains(self->active_nodes, self->active_count, self->conductor_id)) return;
 
@@ -1147,6 +1199,7 @@ void discovery_timeout(App *self, int session)
   // Initial startup has no default conductor. Auto-takeover is only for recovery
   // from a previously known dead network after leaving silent failure.
   if (self->rejoin_after_silent &&
+      !self->was_conductor &&
       self->known_count > 1 &&
       self->active_count <= 1 &&
       (self->conductor_id < 0 ||
@@ -1162,6 +1215,7 @@ void discovery_timeout(App *self, int session)
   else
   {
     self->rejoin_after_silent = 0;
+    self->was_conductor = 0;
   }
 #endif
 }
@@ -1219,6 +1273,7 @@ static void leave_silent_failure(App *self)
 #if ENABLE_PROBLEM_3
   if (!self->is_silent) return;
   int was_f3 = (self->silent_mode == SILENT_F3);
+  int was_conductor = self->was_conductor;
   self->is_silent = 0;
   self->silent_mode = SILENT_NONE;
   self->can_err_count = 0;
@@ -1227,12 +1282,13 @@ static void leave_silent_failure(App *self)
     CAN_INIT(&can0);
   SCI_WRITE(&sci0, "\nLeave Silent Failure\n");
   // if we were conductor, rejoin as musician (P4 requirement)
-  if (self->was_conductor)
+  if (was_conductor)
   {
-    self->was_conductor = 0;
     self->role = MUSICIAN_ROLE;
+    self->conductor_id = -1;
     SCI_WRITE(&sci0, "\nI Now Join As A Musician\n");
   }
+  self->was_conductor = was_conductor;
   self->rejoin_after_silent = 1;
   // re-run discovery; if network is dead (no other active nodes),
   // the node becomes conductor after the 500ms window (handled below)
@@ -1261,12 +1317,7 @@ static void become_conductor(App *self, int reason)
   self->role = CONDUCTOR_ROLE;
   self->conductor_id = self->node_id;
 #if ENABLE_PROBLEM_4
-  int hb_session = ++self->cond_hb_session;
-  if (!self->is_silent && is_valid_node_id(self->node_id))
-  {
-    send_heartbeat_now(self);
-    SEND(MSEC(100), MSEC(2), self, send_cond_hb, hb_session);
-  }
+  start_conductor_hb(self);
 #endif
   // cancel musician watchdog
   self->watchdog_session++;
@@ -1450,13 +1501,28 @@ static void handle_node_failure_announce(App *self, CANMsg *msg)
   if (is_valid_node_id(msg->nodeId))
     add_known_node(self, msg->nodeId);
 
-  // A self-failure announcement is stale once we can receive it again.
+  // If the rest of the network already marked us failed, a reconnecting
+  // conductor must step down instead of continuing a split-brain melody.
   if (failed_node == self->node_id)
   {
     if (!self->is_silent)
     {
-      add_active_node(self, self->node_id);
-      send_discovery_ping(self);
+      if (self->role == CONDUCTOR_ROLE)
+      {
+        stop_local_playback(self);
+        self->role = MUSICIAN_ROLE;
+        self->conductor_id = -1;
+        self->was_conductor = 1;
+        self->rejoin_after_silent = 1;
+        self->active_count = 0;
+        SCI_WRITE(&sci0, "\nI Now Join As A Musician\n");
+        do_discovery(self);
+      }
+      else
+      {
+        add_active_node(self, self->node_id);
+        send_discovery_ping(self);
+      }
     }
     return;
   }
@@ -1610,7 +1676,7 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  p/play, q/stop, s/mute, r/unmute\n");
   SCI_WRITE(&sci0, "  t/tempo 60-240, k/key -5..5, v/volume 0-20\n");
   SCI_WRITE(&sci0, "  node <id> 1-14, claim, R reset key+tempo\n");
-  SCI_WRITE(&sci0, "  m/member, I info, T audio mute\n");
+  SCI_WRITE(&sci0, "  M/member, I info, T audio mute\n");
   SCI_WRITE(&sci0, "  P periodic print, L/canlog, H/canloghb\n");
 #if ENABLE_PROBLEM_3
   SCI_WRITE(&sci0, "  f1 silent, f2 recover 5-10s, f3 CAN off, z leave silent\n");
@@ -1824,7 +1890,7 @@ void command_handler(App *self, char c)
       leave_silent_failure(self);
       return;
     }
-    if (strcmp(self->buffer, "m") == 0 || strcmp(self->buffer, "member") == 0 || strcmp(self->buffer, "membership") == 0)
+    if (strcmp(self->buffer, "M") == 0 || strcmp(self->buffer, "member") == 0 || strcmp(self->buffer, "membership") == 0)
     {
       // show all known nodes and whether they are active or silent
       self->buffer_pos = 0;
