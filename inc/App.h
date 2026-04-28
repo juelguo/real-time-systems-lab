@@ -25,6 +25,7 @@ typedef struct
   int   delta_sec;
   int   seq_tx;
   int   burst_mode;
+  int   print_tx;   /* 1 = print TX seq, 0 = silent */
   /* circular buffer — stores sequence numbers only (avoids CANMsg alignment) */
   int reg_buf[BURST_BUF_SIZE];
   int reg_head;
@@ -32,7 +33,7 @@ typedef struct
   int reg_count;
 } App;
 
-#define initApp() {initObject(), {0}, 0, CONTROL_MODE, initTimer(), 0, 1, 0, 0, {}, 0, 0, 0}
+#define initApp() {initObject(), {0}, 0, CONTROL_MODE, initTimer(), 0, 1, 0, 1, {}, 0, 0, 0}
 
 void reader(App *, int);
 void receiver(App *, int);

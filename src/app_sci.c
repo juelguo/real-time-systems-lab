@@ -15,12 +15,18 @@ void print_helper(App *self)
   SCI_WRITE(&sci0, "  b          Start burst mode (send every 0.5s)\n");
   SCI_WRITE(&sci0, "  x          Stop burst mode\n");
   SCI_WRITE(&sci0, "  d          Set delta (1 / 2 / 5 seconds)\n");
+  SCI_WRITE(&sci0, "  p          Toggle TX seq print (on/off)\n");
   SCI_WRITE(&sci0, "  h | help   Show this menu\n");
   SCI_WRITE(&sci0, "Current delta: ");
   int_to_string(self->delta_sec, buf);
   SCI_WRITE(&sci0, buf);
   SCI_WRITE(&sci0, "s  burst: ");
   if (self->burst_mode)
+    SCI_WRITE(&sci0, "ON");
+  else
+    SCI_WRITE(&sci0, "OFF");
+  SCI_WRITE(&sci0, "  TX print: ");
+  if (self->print_tx)
     SCI_WRITE(&sci0, "ON");
   else
     SCI_WRITE(&sci0, "OFF");
@@ -82,6 +88,14 @@ void command_handler(App *self, char c)
       self->mode = DELTA_SELECT_MODE;
       self->buffer_pos = 0;
       SCI_WRITE(&sci0, "\nEnter delta (1, 2, or 5): ");
+      return;
+    }
+
+    if (strcmp(self->buffer, "p") == 0)
+    {
+      self->buffer_pos = 0;
+      self->print_tx = !self->print_tx;
+      SCI_WRITE(&sci0, self->print_tx ? "\nTX print ON.\n" : "\nTX print OFF.\n");
       return;
     }
 

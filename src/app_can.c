@@ -15,11 +15,14 @@ void send_one_message(App *self, int unused)
   msg.length = 1;
   msg.buff[0] = 0;
 
-  char buf[8];
-  SCI_WRITE(&sci0, "\nTX seq=");
-  int_to_string(self->seq_tx, buf);
-  SCI_WRITE(&sci0, buf);
-  SCI_WRITE(&sci0, "\n");
+  if (self->print_tx)
+  {
+    char buf[8];
+    SCI_WRITE(&sci0, "\nTX seq=");
+    int_to_string(self->seq_tx, buf);
+    SCI_WRITE(&sci0, buf);
+    SCI_WRITE(&sci0, "\n");
+  }
 
   self->seq_tx = (self->seq_tx + 1) & 0x7F;
   CAN_SEND(&can0, &msg);
